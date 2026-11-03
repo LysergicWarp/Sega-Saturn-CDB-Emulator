@@ -1,0 +1,36 @@
+# Three whole checks: four seeks, then three sector checks. The first is accepted, the second
+# scores two of its three passes, and the third fails on purpose.
+# Build the sectors with make.py first. It writes accepted.bin, short.bin and failing.bin, about
+# 7 MB each, to the current directory:
+#
+#   python make.py cdb105.bin
+#   python ring.py cdb105.bin full-check.txt
+#
+# To check a raw read of the ring area of a disc instead, give image that file and its address.
+
+# Every column good: score 3, and the disc is accepted.
+timer 0145
+seek 44f1 09 09 09 09
+seek 44f1 09 09 09 09
+seek 44f1 09 09 09 09
+seek 44f1 09 09 09 09
+image accepted.bin 68:14:20
+pass
+pass
+pass
+
+# 85 good columns score a pass, 84 do not. Two scoring passes are enough.
+# The seeks can be left out to try the sector checks alone.
+timer 0145
+image short.bin 68:14:20
+pass
+pass
+pass
+
+# Zone 12 uses logo rows 12 to 14. The third pass has only 5 good columns, about 21 apart, so the
+# walk stops at column 11 after the first of them. One scoring pass: the check ends with 3.
+timer 0279
+image failing.bin 70:25:65
+pass
+pass
+pass

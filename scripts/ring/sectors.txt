@@ -1,0 +1,11 @@
+# One sector check on sectors from any raw disc image.
+# game.bin stands for a raw image with 2352-byte sectors, the .bin of a .bin/.cue pair. Paths are
+# relative to the current directory.
+#
+#   python ring.py cdb105.bin sectors.txt
+#
+# Ordinary data fails. The read row shows ? where a column holds neither enough a8 nor enough 59
+# bytes, and the walk stops after 11 bad columns in a row.
+
+timer 0145
+pass game.bin 16     # sectors 16, 17 and 18 of the image against logo row 5

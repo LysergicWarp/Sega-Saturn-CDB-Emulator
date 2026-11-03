@@ -1,0 +1,52 @@
+# Drive answers to the four authentication seeks.
+# Seek 1's word must be within 18 of seek 0's, and seek 3's within 20 of seek 2's.
+# Seeks 2 and 3 also carry report bytes a b c d: b must be at least a / 2, d at least c / 2.
+# A failed check ends with 3. The next timer command starts a new check.
+#
+#   python ring.py cdb105.bin seeks.txt
+
+# Answers at the limits: 18 and 20 apart, each second byte exactly half the first.
+timer 0145
+seek 1000
+seek 1012
+seek 2000 61 30 81 40
+seek 1fec 61 30 81 40
+
+# The answer Yabause's drive emulation gives to every ring seek.
+timer 0145
+seek 44f1 09 09 09 09
+seek 44f1 09 09 09 09
+seek 44f1 09 09 09 09
+seek 44f1 09 09 09 09
+
+# A word of 0 or ffff makes the drive seek again 206 frames further on.
+timer 0145
+seek 0000
+seek 1000
+seek ffff
+seek 1010
+seek 2000 40 20 40 20
+seek 2008 40 20 40 20
+
+# Seek 1's word is 19 away from seek 0's.
+timer 0145
+seek 1000
+seek 1013
+
+# The distance does not wrap around: fff0 and 0004 are 65,516 apart.
+timer 0145
+seek fff0
+seek 0004
+
+# Seek 2's byte b is below a / 2.
+timer 0145
+seek 1000
+seek 1000
+seek 2000 61 2f 81 40
+
+# Three answers of 0 or ffff for one seek: the drive gives up.
+timer 0145
+seek 1000
+seek 0000
+seek ffff
+seek 0000

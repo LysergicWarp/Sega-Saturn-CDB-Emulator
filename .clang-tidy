@@ -1,0 +1,17 @@
+# clang-tidy 23, from the Dockerfile's llvm-mingw.
+Checks: >-
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  concurrency-*,
+  performance-*,
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-signed-bitwise,
+  -bugprone-std-exception-baseclass,
+  -bugprone-switch-missing-default-case,
+  -bugprone-throwing-static-initialization,
+  -bugprone-unhandled-code-paths,
+  -performance-enum-size,
+  -portability-avoid-pragma-once
+HeaderFilterRegex: '(include|src|tests)/'

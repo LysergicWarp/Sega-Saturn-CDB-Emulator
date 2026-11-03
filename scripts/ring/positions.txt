@@ -1,0 +1,11 @@
+# How the ITU4 counter picks where a check reads.
+# The zone is counter bits 4..0 modulo 13. The column is bits 10..4, less 70 when it is 70 or more.
+# Each timer command starts a new check and prints its seek targets and check positions.
+#
+#   python ring.py cdb105.bin positions.txt
+
+timer 0145    # zone 5, column 20
+timer 0467    # zone 7, column 70 wraps to 0
+timer ffff    # zone 5 (31 modulo 13), column 57 (127 less 70)
+timer 001a    # zone 0, column 1: the first position moves to 42 frames past 66:30:50
+timer 0279    # zone 12, column 39: offsets 0, 0 and 21 frames (column modulo 39, 39 and 19)

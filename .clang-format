@@ -1,0 +1,4 @@
+# clang-format 23, from the Dockerfile's llvm-mingw.
+BasedOnStyle: Microsoft
+IndentExternBlock: NoIndent
+FixNamespaceComments: false

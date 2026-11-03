@@ -1,0 +1,8 @@
+build/
+__pycache__/
+dumps/*
+!dumps/README.md
+# What the example scenarios write to the folder they run from
+/decompress-input.prs
+/decompress-output.bin
+/transform-output.bin
