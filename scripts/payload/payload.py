@@ -13,11 +13,11 @@ data is padded with zeros to whole eight-byte blocks.
 
 card writes a 512 KB card ROM for INPUT, plain extension code: the encoded length as a big-endian
 longword, the payload, and zeros. The expansion loader accepts an encoded length of 1 to 0x5000
-bytes, so the code can be up to 0x4FF8 bytes. uncard decodes the code from a card ROM, the known
+bytes, so the code can be up to 0x4ff8 bytes. uncard decodes the code from a card ROM, the known
 cards' included.
 
 The block transform and its inverse are written from the decoder's equations, with no firmware
-code. W, SB, U and P in the helpers below are the equations' names, from the Conventions of the
+code. W, SB, U and P in the script's helpers are the equations' names, from the Conventions of the
 firmware documentation's decoder guide:
 https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/decoder.md#conventions
 
@@ -239,7 +239,9 @@ def card_code(rom):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(
+        usage=argparse.SUPPRESS, description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("action", choices=["encode", "decode", "card", "uncard"])
     parser.add_argument("input")
     parser.add_argument("output")
