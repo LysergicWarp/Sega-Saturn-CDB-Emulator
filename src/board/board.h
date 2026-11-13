@@ -305,6 +305,7 @@ class Board final : public Sh1Port, public DrivePort
         return link_.sent();
     }
     size_t sector(const std::vector<uint8_t> &bytes, uint16_t status) override;
+    void subcode(uint8_t symbol, bool block_start) override;
     void note(Note kind, uint32_t address, uint32_t value, std::string text) override;
 
   private:

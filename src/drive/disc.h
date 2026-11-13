@@ -11,9 +11,16 @@
 // before the report of the next link frame, an unreadable one with its decoder status and a
 // missing one not at all. Link frames go on in every state, so the SH-1 can always send a command.
 //
+// Each sector period it reads, the drive also sends a subcode block: 98 frames evenly spaced over
+// the period, the first marked as the block's start. Frames 0 to 95 carry the sector's 96 symbols
+// and frames 96 and 97, the sync frames, the last symbol again. The stream runs for a missing or
+// unreadable sector too and stops as the drive leaves the read. Unconfirmed: whether a real drive
+// streams while paused, seeking or scanning, where a block's first frame falls against the
+// sector's header, and what the sync frames carry.
+//
 // The reports follow what the firmware accepts, the ring seek answers are Yabause's unless the
-// caller's provider gives others, a sector provider can serve the disc's sectors, and the timing
-// is configurable: none of it is confirmed on a real drive.
+// caller's provider gives others, providers can serve the disc's sectors and subcode, and the
+// timing is configurable: none of it is confirmed on a real drive.
 //
 // The tables below give the payload of a link frame (drive.h) as the firmware reads and writes it.
 //
@@ -116,6 +123,11 @@ using RingProvider = std::function<int(uint32_t frame_address, RingAnswer &answe
 // Called as the drive reads a sector, with its frame address and the 2352 raw bytes it would read
 // there to change. Nonzero fails the board.
 using SectorProvider = std::function<int(uint32_t frame_address, uint8_t *raw)>;
+// A sector's subcode: its 96 symbols in disc order, R to W in the low six bits of each.
+using Subcode = std::array<uint8_t, 96>;
+// Called as the drive starts a sector's subcode block, with its frame address and the symbols the
+// disc holds there to change. Nonzero fails the board.
+using SubcodeProvider = std::function<int(uint32_t frame_address, uint8_t *symbols)>;
 
 class DiscDrive final : public Drive
 {
@@ -160,13 +172,22 @@ class DiscDrive final : public Drive
     void reset(uint64_t now) override;
     uint64_t due() const override
     {
-        return step_at && step_at < next_tick ? step_at : next_tick;
+        uint64_t at = next_tick;
+        for (const uint64_t other : {step_at, subcode_at})
+            if (other && other < at)
+                at = other;
+        return at;
     }
     void act(DrivePort &port) override;
     // A raw sector of 2352 bytes read at frame_address, in place of one with only a mode 1 header.
     void write_sector(uint32_t frame_address, std::vector<uint8_t> raw)
     {
         sectors[frame_address] = std::move(raw);
+    }
+    // The subcode of the sector at frame_address, in place of zeros.
+    void write_subcode(uint32_t frame_address, const Subcode &symbols)
+    {
+        subcodes[frame_address] = symbols;
     }
     // The disc's tracks and lead-out, which invalid() accepts.
     void set_tracks(std::vector<Track> list, uint32_t end)
@@ -190,8 +211,15 @@ class DiscDrive final : public Drive
     {
         sector_provider = std::move(provider);
     }
+    // The subcode read from provider, the disc's own for an empty one.
+    void set_subcode_provider(SubcodeProvider provider)
+    {
+        subcode_provider = std::move(provider);
+    }
 
   private:
+    // A subcode block's frames: 96 symbols, then two sync frames.
+    static constexpr unsigned block_frames = 98;
     enum class Mode
     {
         Toc,
@@ -211,13 +239,20 @@ class DiscDrive final : public Drive
 
     DiscDriveConfig config;
     std::map<uint32_t, std::vector<uint8_t>> sectors;
+    std::map<uint32_t, Subcode> subcodes;
     std::vector<Track> tracks{{first_track_start, 0x41}};
     // 63:04:00, the latest lead-out Sega's disc format standard allows.
     uint32_t lead_out = 283'800;
     std::vector<Span> spans;
     RingProvider ring_provider;
     SectorProvider sector_provider;
+    SubcodeProvider subcode_provider;
     RingAnswer ring_answer{};
+    // The subcode block being sent: its symbols, when it started, the sector period it spreads
+    // over, its next frame and when that is due, 0 with no block.
+    Subcode block{};
+    uint64_t block_at = 0, block_period = 0, subcode_at = 0;
+    unsigned block_frame = 0;
     // The mode, and the one a seek, read or ring seek takes on arriving.
     Mode mode = Mode::Paused, arrival = Mode::Paused;
     uint32_t position = first_track_start, target = first_track_start;
@@ -238,6 +273,10 @@ class DiscDrive final : public Drive
     uint32_t landing() const;
     void halt(Mode next);
     void deliver(DrivePort &port, uint32_t frame_address);
+    // Starts the subcode block of the sector at frame_address, its first frame now.
+    void stream(DrivePort &port, uint32_t frame_address, uint64_t now);
+    // The block's frames that are due.
+    void frames(DrivePort &port, uint64_t now);
     // The span frame_address lies in, the latest given, or null for a present sector.
     const Span *span_at(uint32_t frame_address) const;
     bool unreachable(uint32_t frame_address) const

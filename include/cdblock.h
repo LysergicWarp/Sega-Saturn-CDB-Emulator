@@ -217,9 +217,9 @@ CDBLOCK_EXPORT int cdblock_host_port_push(cdblock_board *board, const uint16_t *
 CDBLOCK_EXPORT long cdblock_host_transfer(cdblock_board *board, size_t count, const uint16_t *in, uint16_t *out);
 CDBLOCK_EXPORT size_t cdblock_host_fifo(const cdblock_board *board, uint16_t *control);
 
-/* Decoder input: header and subcode sync flags (bits 4 and 5, IRQ7 while enabled), a sector's
- * bytes with its status word, their transfer on DMA channel 0 (returns the words moved), and the
- * subcode symbol word. */
+/* Decoder input: header and subcode sync flags (bits 4 and 5, IRQ7 while enabled) and the subcode
+ * block start (bit 6), a sector's bytes with its status word, their transfer on DMA channel 0
+ * (returns the words moved), and the subcode symbol word. */
 CDBLOCK_EXPORT int cdblock_decoder_flags(cdblock_board *board, uint16_t bits);
 CDBLOCK_EXPORT int cdblock_decoder_load(cdblock_board *board, const uint8_t *bytes, size_t count, uint16_t status);
 CDBLOCK_EXPORT long cdblock_decoder_transfer(cdblock_board *board);
@@ -338,6 +338,30 @@ CDBLOCK_EXPORT int cdblock_drive_disc_ring_provider(cdblock_board *board, cdbloc
 typedef int (*cdblock_sector_provider)(void *user, uint32_t frame_address, uint8_t *raw);
 CDBLOCK_EXPORT int cdblock_drive_disc_sector_provider(cdblock_board *board, cdblock_sector_provider provider,
                                                       void *user);
+/* Subcode. Each sector period the drive reads, it sends the sector's subcode block to the interface
+ * chip: 98 frames evenly spaced over the period. Each frame sets the symbol word (0x0a000018) and
+ * raises decoder flag 5, the first of a block flag 6 with it, so IRQ7 follows the enables the
+ * firmware wrote.
+ * - cdblock_drive_disc_subcode gives the sector at frame_address its 96 symbols in disc order, R to
+ *   W in the low six bits of each. A sector without any has zeros. They stay as the sectors do.
+ * - Frames 0 to 95 carry the symbols, each byte whole in the symbol word. Frames 96 and 97, the
+ *   sync frames, leave the last symbol there.
+ * - The stream runs for a missing or unreadable sector too, and for data as for audio. It stops as
+ *   the drive leaves the read, and a pause ends the block being sent.
+ * - A subcode provider, NULL for the disc's own, is called as the drive starts each block with
+ *   user, the frame address and the 96 symbols the disc holds there, which it may change. It
+ *   follows the sector provider's rules: a nonzero return fails the board, it runs inside the call
+ *   that ran the drive, must not change the board, and goes with the drive.
+ * - The fed drive sends no subcode: its caller raises the flags and sets the symbol word, with
+ *   cdblock_decoder_flags and cdblock_decoder_subcode.
+ * - Unconfirmed: whether a real drive streams while paused, seeking or scanning, whether the
+ *   interface chip sets flag 5 while its enable is clear, where a block's first frame falls against
+ *   the sector's header flag (here at the same time, after it), what the sync frames carry, and the
+ *   symbol word's bits above the symbol. */
+CDBLOCK_EXPORT int cdblock_drive_disc_subcode(cdblock_board *board, uint32_t frame_address, const uint8_t symbols[96]);
+typedef int (*cdblock_subcode_provider)(void *user, uint32_t frame_address, uint8_t symbols[96]);
+CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdblock_subcode_provider provider,
+                                                       void *user);
 
 /* MPEG card.
  * - cdblock_card_request pulses a data request count times, TIOCA1 for video or TIOCA0 for audio,

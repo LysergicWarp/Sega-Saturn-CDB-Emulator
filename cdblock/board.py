@@ -10,8 +10,9 @@ from collections import namedtuple
 from . import binding as b
 
 LogEntry = namedtuple("LogEntry", "kind pc address value size instruction text")
-# Bytes in a raw sector, sync and header included.
+# Bytes in a raw sector, sync and header included, and symbols in a sector's subcode.
 RAW_SECTOR = 2352
+SUBCODE = 96
 
 
 class EmulatorError(Exception):
@@ -46,6 +47,8 @@ class Board:
             copy.drive_disc_ring_provider(self._rings)
         if self._sectors is not None:
             copy.drive_disc_sector_provider(self._sectors)
+        if self._subcodes is not None:
+            copy.drive_disc_subcode_provider(self._subcodes)
         return copy
 
     def close(self):
@@ -348,6 +351,35 @@ class Board:
         # The library holds the callback, so it stays referenced here.
         self._sectors, self._sector_callback = provider, callback
 
+    def drive_disc_subcode(self, frame_address, symbols):
+        """The subcode of the sector at frame_address: its 96 symbols in disc order, R to W in the
+        low six bits of each."""
+        symbols = bytes(symbols)
+        if len(symbols) != SUBCODE:
+            raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
+        data = (b.u8 * SUBCODE).from_buffer_copy(symbols)
+        self._ok(self.lib.cdblock_drive_disc_subcode(self.handle, frame_address, data))
+
+    def drive_disc_subcode_provider(self, provider):
+        """provider(frame_address, symbols) sees each sector's subcode as the drive starts its
+        block, a missing sector's too. symbols is the 96 bytes the disc holds there, zeros for a
+        sector without any. It returns 96 bytes to send instead, or None to leave them. None for the
+        disc's own subcode throughout. An exception, the board and the drive as for
+        drive_disc_ring_provider."""
+        callback = b.SubcodeProvider()
+        if provider is not None:
+            def answer(frame_address, out):
+                given = provider(frame_address, ctypes.string_at(out, SUBCODE))
+                if given is not None:
+                    given = bytes(given)
+                    if len(given) != SUBCODE:
+                        raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(given)}")
+                    ctypes.memmove(out, given, SUBCODE)
+            callback = b.SubcodeProvider(self._provider_callback(answer))
+        self._ok(self.lib.cdblock_drive_disc_subcode_provider(self.handle, callback, None))
+        # The library holds the callback, so it stays referenced here.
+        self._subcodes, self._subcode_callback = provider, callback
+
     def _provider_callback(self, answer):
         """answer(frame_address, out) as the library calls a provider. An exception from it fails
         the board."""
@@ -367,6 +399,7 @@ class Board:
 
     def _no_providers(self):
         self._rings = self._ring_callback = self._sectors = self._sector_callback = None
+        self._subcodes = self._subcode_callback = None
         self._provider_error = None
 
     # MPEG card.

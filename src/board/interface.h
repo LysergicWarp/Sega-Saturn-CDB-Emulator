@@ -27,8 +27,9 @@ class Interface
 {
   public:
     static constexpr size_t fifo_words = 6;
-    // The decoder's flags among IRQ7's: a sector header found, and a subcode sync.
-    static constexpr uint16_t HEADER_SYNC = 0x0010, SUBCODE_SYNC = 0x0020;
+    // The decoder's flags among IRQ7's: a sector header found, a subcode sync, and with it the start
+    // of a subcode block.
+    static constexpr uint16_t HEADER_SYNC = 0x0010, SUBCODE_SYNC = 0x0020, SUBCODE_BLOCK = 0x0040;
 
     explicit Interface(Board &owner) : board(&owner)
     {
