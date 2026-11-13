@@ -962,6 +962,7 @@ void disc_drive_subcode()
     config.landing_frames = 0; // reads start at their frame address: this test checks what they send
     config.seek_cycles = 0;
     Peer peer(b, &config);
+    CHECK(cdblock_drive_disc_subcode(b, 1001, nullptr) == -1 && contains(b.error(), "no subcode"));
     CHECK(cdblock_drive_disc_subcode(b, 1001, written) == 0 && cdblock_drive_disc_subcode(b, 1002, other) == 0);
     CHECK(cdblock_drive_disc_sector_state(b, 1002, 1, CDBLOCK_SECTOR_MISSING, 0) == 0);
     auto command = [&](Peer &to, uint8_t code, uint32_t frame_address, uint8_t speed) {

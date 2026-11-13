@@ -559,6 +559,8 @@ int cdblock_drive_disc_subcode(cdblock_board *b, uint32_t frame_address, const u
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
         return fail(b, "the drive has no disc");
+    if (!symbols)
+        return fail(b, "no subcode given");
     cdblock::Subcode subcode;
     std::copy(symbols, symbols + subcode.size(), subcode.begin());
     disc->write_subcode(frame_address, subcode);
