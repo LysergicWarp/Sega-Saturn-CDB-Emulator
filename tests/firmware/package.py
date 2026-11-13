@@ -18,6 +18,9 @@ known revision: strict, the clock skipping on at the profile's idle loop.
   its exceptions come back from the run on the board that ran it, its copy's too.
 - The drive's subcode on CDB105: an audio play with 04's R-W setting on, where 20 returns each pack
   the disc holds once, in order and without an error flag, until the pause ends them.
+- The drive's subcode provider in Python on CDB105, as the sector provider: what it leaves or
+  replaces reaches the host as packs, and its exceptions come back from the run on the board that
+  ran it.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -63,6 +66,13 @@ WRITTEN, REPLACED = b"written".ljust(DATA, b"\0"), b"replaced".ljust(DATA, b"\0"
 AUDIO_TRACK, AUDIO_START = 0x01, 20_000
 PLAY_FRAME_ADDRESS, PLAY_SECTORS, SUBCODE_MARGIN = 20_100, 40, 16
 SECTOR_CYCLES = 266_667
+# What these plays return, pinned as the runs have it on the drive's default settings: four packs
+# for each sector played, the first 11 packs before the one that starts the subcode of the play's
+# first sector. The runs are deterministic.
+FIRST_PACK = rw.SECTOR_PACKS * SUBCODE_MARGIN - 11
+# The subcode provider's plays. Its replacing provider answers each sector with the subcode
+# generated for the one PROVIDED_SHIFT sectors further on.
+PROVIDED_SECTORS, PROVIDED_SHIFT = 8, 256
 
 
 class ProviderStop(Exception):
@@ -320,7 +330,8 @@ def check_sector_provider(suite, dumps):
 
 def get_subcode(host):
     """20 type 1, Get Subcode R-W: None when it answers WAIT, or the error flags in CR4 and the
-    pack's 24 symbols, moved through the FIFO and ended with 06, which sets no EHST here."""
+    pack's 24 symbols, moved through the FIFO and ended with 06, which sets no EHST here. A
+    transfer that is not a pack's 12 words raises RunError before a word moves."""
     board, name = host.board, "20 get subcode"
     answer = host.command([0x2001, 0, 0, 0], name=name)
     status = answer[0] >> 8
@@ -328,16 +339,83 @@ def get_subcode(host):
         raise RunError(f"{name}: rejected")
     if status & WAIT:
         return None
-    data = []
+    total, data = (answer[0] & 0xFF) << 16 | answer[1], []
+    if total != rw.PACK // 2:
+        raise RunError(f"{name}: a transfer of {total} words, not a pack's {rw.PACK // 2}")
 
     def move(_, n):
         got = board.host_transfer(n)
         data.extend(got)
         return len(got)
 
-    host._transfer(name, move, (answer[0] & 0xFF) << 16 | answer[1])
+    host._transfer(name, move, total)
     host.command([0x0600, 0, 0, 0], name="06 end transfer")
     return answer[3], [symbol for word in data for symbol in (word >> 8, word & 0xFF)]
+
+
+def subcode_board(image):
+    """A board for a subcode play, with its host and the disc for its drive: a data track, then the
+    audio track."""
+    bd = board(image, flags=HARNESS_FLAGS)
+    strict.apply(bd, PROFILES["cdb105"], None)
+    host = Host(bd, idle=PROFILES["cdb105"].IDLE)
+    return bd, host, Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK)))
+
+
+def insert_subcode(host, disc):
+    """04's R-W setting on, then the disc in the drive with the generated packs around the frames
+    played. The board takes the subcode after the insert, which selects the drive again."""
+    host.command([0x0402, 0xFFFF, 0, 0xFFFF], name="04 R-W subcode on")
+    Drive(host).insert(disc)
+    for n in range(PLAY_SECTORS + 2 * SUBCODE_MARGIN):
+        host.board.drive_disc_subcode(PLAY_FRAME_ADDRESS - SUBCODE_MARGIN + n, rw.sector(n))
+
+
+def read_packs(host, packs):
+    """Every pack 20 has for the host now, added to packs."""
+    while True:
+        got = get_subcode(host)
+        if got is None:
+            return
+        packs.append(got)
+
+
+def idle_for(host, cycles, what, flags=0):
+    bd = host.board
+    until = bd.cycles + cycles
+    host.idle_until(lambda: bd.cycles >= until or bd.host_flags() & flags, what)
+
+
+def play_subcode(host, sectors):
+    """An audio play of sectors from PLAY_FRAME_ADDRESS, the host asking for the packs with 20 once
+    a sector period. Returns the packs it got by two periods after the play, when the drive has
+    paused. A play that does not end raises RunError as the host's waits do."""
+    bd, packs = host.board, []
+    bd.host_clear_flags(0xFFFF & ~PEND)
+    answer = host.command([0x1080 | PLAY_FRAME_ADDRESS >> 16, PLAY_FRAME_ADDRESS & 0xFFFF,
+                           0x0080 | sectors >> 16, sectors & 0xFFFF], name="10 play")
+    if answer[0] >> 8 == REJECT:
+        raise RunError("10 play: rejected")
+    start = bd.cycles
+    while not bd.host_flags() & PEND:
+        if bd.cycles - start > WAIT_CYCLES:
+            raise RunError(f"audio play: {WAIT_CYCLES:,} cycles passed")
+        read_packs(host, packs)
+        idle_for(host, SECTOR_CYCLES, "audio play", PEND)
+    idle_for(host, 2 * SECTOR_CYCLES, "after the play")
+    read_packs(host, packs)
+    return packs
+
+
+def check_packs(case, what, packs, sectors, shift=0):
+    """The packs of a play of sectors: four a sector from FIRST_PACK, each once and in order, as the
+    disc holds them shift sectors on, none with an error flag. what names the play in a failure."""
+    first = FIRST_PACK + rw.SECTOR_PACKS * shift
+    case.check(all(flags == 0 for flags, _ in packs),
+               f"{what}: a pack came with the pack data error or the overrun flag")
+    case.check([symbols for _, symbols in packs] == [rw.pack(first + k) for k in range(rw.SECTOR_PACKS * sectors)],
+               f"{what}: not packs {first} to {first + rw.SECTOR_PACKS * sectors - 1}, each once and in order: "
+               f"{[rw.number(symbols) for _, symbols in packs]}")
 
 
 def check_subcode(suite, dumps):
@@ -345,57 +423,92 @@ def check_subcode(suite, dumps):
     and decodes the packs, and the host asks for them with 20 once a sector period. After the play
     the drive pauses, which ends the frames: the decoded packs still come, then none."""
     case = suite.case("cdb105 subcode")
-    image, idle = dumps.rom("cdb105"), PROFILES["cdb105"].IDLE
-    disc = Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK)))
-    bd = board(image, flags=HARNESS_FLAGS)
-    strict.apply(bd, PROFILES["cdb105"], None)
-    packs = []
-
-    def read(host):
-        while True:
-            got = get_subcode(host)
-            if got is None:
-                return
-            packs.append(got)
-
-    def idle_for(host, cycles, what, flags=0):
-        until = bd.cycles + cycles
-        host.idle_until(lambda: bd.cycles >= until or bd.host_flags() & flags, what)
-
+    bd, host, disc = subcode_board(dumps.rom("cdb105"))
     try:
-        host = Host(bd, idle=idle)
         host.boot()
-        host.command([0x0402, 0xFFFF, 0, 0xFFFF], name="04 R-W subcode on")
-        Drive(host).insert(disc)
-        first = PLAY_FRAME_ADDRESS - SUBCODE_MARGIN
-        for n in range(PLAY_SECTORS + 2 * SUBCODE_MARGIN):
-            bd.drive_disc_subcode(first + n, rw.sector(n))
-        bd.host_clear_flags(0xFFFF & ~PEND)
-        answer = host.command([0x1080 | PLAY_FRAME_ADDRESS >> 16, PLAY_FRAME_ADDRESS & 0xFFFF,
-                               0x0080 | PLAY_SECTORS >> 16, PLAY_SECTORS & 0xFFFF], name="10 play")
-        case.check(answer[0] >> 8 != REJECT, "10 play: rejected")
-        while not bd.host_flags() & PEND:
-            read(host)
-            idle_for(host, SECTOR_CYCLES, "audio play", PEND)
-        idle_for(host, 2 * SECTOR_CYCLES, "after the play")
-        read(host)
+        insert_subcode(host, disc)
+        packs = play_subcode(host, PLAY_SECTORS)
         played = len(packs)
         idle_for(host, 4 * SECTOR_CYCLES, "paused")
-        read(host)
+        read_packs(host, packs)
         case.equal(len(packs), played, "packs once the drive paused")
-        numbers = [rw.number(symbols) for _, symbols in packs]
-        case.check(len(packs) >= 4 * (PLAY_SECTORS - 8), f"{len(packs)} packs from {PLAY_SECTORS} sectors")
-        case.check(all(flags == 0 for flags, _ in packs), "a pack came with the pack data error or the overrun flag")
-        case.check(all(symbols == rw.pack(x) for x, (_, symbols) in zip(numbers, packs)),
-                   "a pack differs from the disc's")
-        case.check(numbers == [(numbers[0] + k) % rw.NUMBERS for k in range(len(numbers))] if numbers else False,
-                   f"the packs are not each once, in order: {numbers}")
-        case.info["packs"], case.info["first"] = len(packs), numbers[0] if numbers else None
+        check_packs(case, "the play", packs, PLAY_SECTORS)
+        case.info["packs"], case.info["first"] = len(packs), rw.number(packs[0][1]) if packs else None
         case.info["flags"] = sorted({flags for flags, _ in packs})
     except (RunError, EmulatorError) as error:
         case.check(False, f"failed: {error!r}")
     case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
     bd.close()
+
+
+def check_subcode_provider(suite, dumps):
+    """A provider that raises, set before the drive is selected again for the disc, so a copy
+    reaches it if selecting keeps it. Then each provider on its own copy of the board that took the
+    disc, as a board one fails needs a reset: one that leaves the subcode, one that replaces it, one
+    dropped again, a malformed answer and an exception on a copy of the board it was set on."""
+    case = suite.case("cdb105 subcode provider")
+    bd, host, disc = subcode_board(dumps.rom("cdb105"))
+    idle, boards, first = host.idle, [bd], PLAY_FRAME_ADDRESS - SUBCODE_MARGIN
+
+    def provided(provider):
+        copy = bd.clone()
+        boards.append(copy)
+        copy.drive_disc_subcode_provider(provider)
+        return copy
+
+    def played(copy):
+        return play_subcode(Host(copy, idle=idle), PROVIDED_SECTORS)
+
+    def stop(frame_address, symbols):
+        raise ProviderStop(frame_address)
+
+    try:
+        host.boot()
+        bd.drive_select_disc()
+        bd.drive_disc_subcode_provider(stop)
+        insert_subcode(host, disc)
+
+        # A copy takes no provider from a drive selected since.
+        plain = bd.clone()
+        boards.append(plain)
+        check_packs(case, "the disc's own subcode", played(plain), PROVIDED_SECTORS)
+
+        seen = {}
+        left = provided(lambda frame_address, symbols: seen.update({frame_address: symbols}))
+        check_packs(case, "subcode left alone", played(left), PROVIDED_SECTORS)
+        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == rw.sector(frame_address - first)
+                                                      for frame_address, symbols in seen.items()),
+                   "the provider saw other subcode than the disc's")
+        case.info["frame_addresses"] = sorted(seen)
+
+        def replace(frame_address, symbols):
+            return rw.sector(frame_address - first + PROVIDED_SHIFT)
+
+        check_packs(case, "replaced subcode", played(provided(replace)), PROVIDED_SECTORS, PROVIDED_SHIFT)
+
+        dropped = provided(replace)
+        dropped.drive_disc_subcode_provider(None)
+        check_packs(case, "a provider dropped again", played(dropped), PROVIDED_SECTORS)
+
+        try:
+            played(provided(lambda frame_address, symbols: b"short"))
+            case.check(False, "the play with malformed subcode ended")
+        except ValueError as error:
+            case.check("96 symbols" in str(error), f"raised {error}")
+
+        # The copy's own run raises it, not the board it was copied from.
+        stopped = provided(stop).clone()
+        boards.append(stopped)
+        try:
+            played(stopped)
+            case.check(False, "the play with a raising provider ended")
+        except ProviderStop:
+            case.check("subcode provider stopped the run" in stopped.error(), f"the board's error: {stopped.error()}")
+    except (RunError, EmulatorError, ProviderStop) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    for each in boards:
+        each.close()
 
 
 def cli_status(argv):
@@ -484,10 +597,11 @@ def run(context):
         check_wait_limit(suite, dumps)
         check_sector_provider(suite, dumps)
         check_subcode(suite, dumps)
+        check_subcode_provider(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the sector provider and the subcode: need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, the providers and the subcode: need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 59)
+        suite.pin("cases", len(suite.cases), 60)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:
