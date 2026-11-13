@@ -11,7 +11,8 @@ known revision: strict, the clock skipping on at the profile's idle loop.
 - The lifecycle and module example extensions, each as source, ELF, plain code and card ROM on
   CDB105, each form run the same, and its card ROM on the other revisions. These need binutils.
 - The command line: its exit status for a run, strict on a known revision and lenient on a dump
-  of none, refused inputs and a scenario that mixes the host's helpers with a run to an address.
+  of none, refused inputs, a library that is not there and a scenario that mixes the host's
+  helpers with a run to an address.
 - A wait that never ends fails on the clock's cycles, as skipped time costs no instructions.
 - The drive's sector provider in Python on CDB105: what it leaves or replaces reaches the host, and
   its exceptions come back from the run on the board that ran it, its copy's too.
@@ -22,6 +23,7 @@ the drive act on their own.
 import contextlib
 import hashlib
 import io
+import os
 import pathlib
 
 from cdblock import __main__ as cli
@@ -353,6 +355,16 @@ def check_cli(suite, dumps, out):
     half.write_bytes(firmware.read_bytes()[:0x8000])
     status, _, _ = cli_status(["--firmware", half])
     case.equal(status, 2, "half a firmware dump")
+    kept = os.environ.get("CDBLOCK_LIB")
+    os.environ["CDBLOCK_LIB"] = str(out / "no-library")
+    try:
+        status, _, errors = cli_status(["--firmware", firmware])
+    finally:
+        if kept is None:
+            del os.environ["CDBLOCK_LIB"]
+        else:
+            os.environ["CDBLOCK_LIB"] = kept
+    case.check(status == 2 and "did not load" in errors, f"no library: {status}, {errors.strip()}")
     scenario = out / "idle-after-host.py"
     scenario.write_text(SCENARIO)
     status, text, _ = cli_status(["--firmware", firmware, scenario])

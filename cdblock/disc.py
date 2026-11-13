@@ -22,17 +22,13 @@ unless settings change it. How often a real drive sends link frames, how far its
 sectors and whether a pressed disc holds these sectors at the check positions are unknown.
 """
 import hashlib
-import pathlib
-import sys
 
-from . import binding
+from . import _scripts, binding
 from .host import EFLS, ESEL, PEND, REJECT, RunError
 
-# ring.py and make.py stay standalone scripts that a reader runs from scripts/ring/, so the package
-# imports them from there instead of keeping a copy.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts" / "ring"))
-import make  # noqa: E402
-import ring  # noqa: E402
+# make.py imports ring.py by its top-level name.
+_ring = _scripts.load("ring", "ring")
+_make = _scripts.load("ring", "make", ring=_ring)
 
 SECTOR, DATA = 2352, 2048
 FIRST = 150             # 00:02:00, the data track's first frame address
@@ -58,7 +54,7 @@ def sector(frame_address, mode=1, submode=0, data=b""):
     subheader at byte 24, which holds submode twice. The rest is 00."""
     raw = bytearray(SECTOR)
     raw[1:11] = b"\xff" * 10
-    raw[12:16] = make.bcd_address(frame_address) + bytes([mode])
+    raw[12:16] = _make.bcd_address(frame_address) + bytes([mode])
     start = 16
     if mode == 2:
         raw[16:24] = bytes([0, 0, submode, 0]) * 2
@@ -131,14 +127,14 @@ class Disc:
     accepts two scoring passes."""
 
     def __init__(self, rom, header=FIRST, tracks=((FIRST, DATA_TRACK),), lead_out=LEAD_OUT, seeks=None,
-                 logo=ring.LOGO_COLUMNS):
-        known = ring.REVISIONS.get(hashlib.sha1(rom).hexdigest())
+                 logo=_ring.LOGO_COLUMNS):
+        known = _ring.REVISIONS.get(hashlib.sha1(rom).hexdigest())
         if known is None:
             raise NotSupported("the ring sectors need the check tables of a known revision")
-        tables = ring.Tables(rom, known[1])
+        tables = _ring.Tables(rom, known[1])
         counts = [logo] * RING_ROWS if isinstance(logo, int) else list(logo)
-        if len(counts) != RING_ROWS or not all(0 <= c <= ring.LOGO_COLUMNS for c in counts):
-            raise ValueError(f"logo is a count of 0 to {ring.LOGO_COLUMNS} good columns, or {RING_ROWS} of them")
+        if len(counts) != RING_ROWS or not all(0 <= c <= _ring.LOGO_COLUMNS for c in counts):
+            raise ValueError(f"logo is a count of 0 to {_ring.LOGO_COLUMNS} good columns, or {RING_ROWS} of them")
         self.header, self.tracks, self.lead_out, self.seeks, self.logo = header, list(tracks), lead_out, seeks, counts
         # (frame address, count, state, decoder status) in order, as the drive takes them.
         self.states = []
@@ -147,11 +143,11 @@ class Disc:
             self.sectors[header] = sector(header, data=IDENTIFIER + MAKER + PRODUCT)
         for row in range(RING_ROWS):
             # Past the header the sectors of a row are the same at every position.
-            bodies = [raw[16:] for raw in make.build(tables, 0, row, make.spread(counts[row]))]
+            bodies = [raw[16:] for raw in _make.build(tables, 0, row, _make.spread(counts[row]))]
             for grid_column in range(RING_COLUMNS):
-                position = ring.FIRST_POSITION + ring.ZONE_FRAMES * row + ring.COLUMN_FRAMES * grid_column
+                position = _ring.FIRST_POSITION + _ring.ZONE_FRAMES * row + _ring.COLUMN_FRAMES * grid_column
                 for s, body in enumerate(bodies):
-                    self.sectors[position + s] = make.header(position + s) + body
+                    self.sectors[position + s] = _make.header(position + s) + body
 
     def write(self, frame_address, data, mode=1, submode=0):
         """Data in sectors from frame_address on, 2048 bytes each, the last padded with zeros.

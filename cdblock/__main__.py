@@ -75,6 +75,12 @@ def main(argv=None):
     except (OSError, extensions.ExtensionError) as error:
         print(f"cdblock: {error}", file=sys.stderr)
         return 2
+    try:
+        lib = binding.load()
+    except OSError as error:
+        print(f"cdblock: the emulator library {binding.library_path()} did not load: build it with make, or "
+              f"name one with CDBLOCK_LIB ({error})", file=sys.stderr)
+        return 2
 
     sha1 = hashlib.sha1(rom).hexdigest()
     profile = PROFILES.get(sha1)
@@ -83,7 +89,8 @@ def main(argv=None):
     if extension:
         print(f"card      {extension.name}, {len(extension.code):#x} bytes of code, version byte {extension.code[0]}", file=out)
 
-    board = Board(rom, card_rom=extension.card if extension else None, flags=binding.DEVICE_TIMING | binding.CLOCK)
+    board = Board(rom, card_rom=extension.card if extension else None, flags=binding.DEVICE_TIMING | binding.CLOCK,
+                  lib=lib)
     if profile:
         print(f"checks    {strict.apply(board, profile, extension)}", file=out)
     else:

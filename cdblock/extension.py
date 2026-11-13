@@ -10,10 +10,9 @@ import sys
 import tempfile
 from collections import namedtuple
 
-# payload.py stays a standalone script that a reader runs from scripts/payload/, so the package
-# imports it from there instead of keeping a copy.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts" / "payload"))
-import payload  # noqa: E402
+from . import _scripts
+
+payload = _scripts.load("payload", "payload")
 
 # The expansion loader decodes card code here, where the known cards' code is linked to run.
 LOAD = 0x0907B000
