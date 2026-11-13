@@ -554,6 +554,32 @@ int cdblock_drive_disc_sector_provider(cdblock_board *b, cdblock_sector_provider
     return 0;
 }
 
+int cdblock_drive_disc_subcode(cdblock_board *b, uint32_t frame_address, const uint8_t symbols[96])
+{
+    auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
+    if (!disc)
+        return fail(b, "the drive has no disc");
+    cdblock::Subcode subcode;
+    std::copy(symbols, symbols + subcode.size(), subcode.begin());
+    disc->write_subcode(frame_address, subcode);
+    return 0;
+}
+
+int cdblock_drive_disc_subcode_provider(cdblock_board *b, cdblock_subcode_provider provider, void *user)
+{
+    auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
+    if (!disc)
+        return fail(b, "the drive has no disc");
+    if (!provider)
+    {
+        disc->set_subcode_provider(nullptr);
+        return 0;
+    }
+    disc->set_subcode_provider(
+        [provider, user](uint32_t frame_address, uint8_t *symbols) { return provider(user, frame_address, symbols); });
+    return 0;
+}
+
 int cdblock_drive_feed_link_frame(cdblock_board *b, const uint8_t link_frame[13])
 {
     if (failed(b))

@@ -53,6 +53,8 @@ class RingAnswer(ctypes.Structure):
 RingProvider = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINTER(RingAnswer))
 # int provider(void *user, uint32_t frame_address, uint8_t *raw)
 SectorProvider = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINTER(u8))
+# int provider(void *user, uint32_t frame_address, uint8_t symbols[96])
+SubcodeProvider = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINTER(u8))
 
 
 class LogEntry(ctypes.Structure):
@@ -116,6 +118,8 @@ FUNCTIONS = [
     ("cdblock_drive_disc_sector_state", c_int, [Board, u32, u32, c_int, u16]),
     ("cdblock_drive_disc_ring_provider", c_int, [Board, RingProvider, ctypes.c_void_p]),
     ("cdblock_drive_disc_sector_provider", c_int, [Board, SectorProvider, ctypes.c_void_p]),
+    ("cdblock_drive_disc_subcode", c_int, [Board, u32, P(u8)]),
+    ("cdblock_drive_disc_subcode_provider", c_int, [Board, SubcodeProvider, ctypes.c_void_p]),
     ("cdblock_card_request", c_int, [Board, c_int, ctypes.c_uint]),
     ("cdblock_card_interrupt", c_int, [Board, c_int]),
     ("cdblock_card_push_status", c_int, [Board, u16]),

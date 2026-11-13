@@ -3,6 +3,7 @@
 // by hand at each of the drive's events.
 #include "test.h"
 
+#include <algorithm>
 #include <array>
 
 namespace
@@ -39,6 +40,14 @@ struct Peer
     bool failed = false;
     // The drive's strobe spacing, the link frame's end that long after its last strobe.
     uint64_t spacing = strobe;
+    // Each subcode frame taken so far: its cycle, the symbol word and whether it started a block.
+    struct Frame
+    {
+        uint64_t cycle;
+        uint16_t word;
+        bool start;
+    };
+    std::vector<Frame> frames;
 
     // A board copied from one with a peer keeps its drive: select false.
     explicit Peer(const Board &board, const cdblock_drive_config *config = nullptr, bool select = true) : b(board)
@@ -79,8 +88,9 @@ struct Peer
     {
         std::vector<uint8_t> got;
         strobes.clear();
-        // A strobe and its transfer's end each, then the link frame's end.
-        for (int events = 0; events < 64; ++events)
+        // A strobe and its transfer's end each, then the link frame's end, and a sector period's
+        // subcode frames while the drive reads.
+        for (int events = 0; events < 160; ++events)
         {
             const uint64_t next = cdblock_clock_next(b);
             if (!next)
@@ -90,6 +100,7 @@ struct Peer
                 failed = true;
                 return got;
             }
+            subcode();
             if (b.peek(0x05ffff25, 1) & 2)
             {
                 const size_t k = strobes.size();
@@ -113,15 +124,30 @@ struct Peer
                 b.write(0x05fffec4, 1, 0xbf);
                 stage(0);
                 // The link frame ends a strobe period after its last strobe, and its command with it,
-                // unless it ended with the last transfer.
-                const uint64_t end = strobes.back() + spacing, now = cdblock_clock_cycles(b);
-                if (now < end && cdblock_clock_advance(b, end - now) != 0)
-                    failed = true;
+                // unless it ended with the last transfer. Event by event, for the subcode frames.
+                const uint64_t end = strobes.back() + spacing;
+                while (!failed && cdblock_clock_cycles(b) < end)
+                {
+                    const uint64_t left = end - cdblock_clock_cycles(b), event = cdblock_clock_next(b);
+                    failed = cdblock_clock_advance(b, event && event < left ? event : left) != 0;
+                    subcode();
+                }
                 return got;
             }
         }
         CHECK(false); // the link frame did not end
         return got;
+    }
+
+    // A subcode frame taken as the firmware's handler takes it: the symbol word read, flags 5 and 6
+    // cleared.
+    void subcode()
+    {
+        const uint32_t flags = b.peek(0x0a000006, 2);
+        if (!(flags & 0x20))
+            return;
+        frames.push_back({cdblock_clock_cycles(b), uint16_t(b.peek(0x0a000018, 2)), (flags & 0x40) != 0});
+        b.write(0x0a000006, 2, 0xff9f);
     }
 
     bool comsync() const
@@ -879,6 +905,213 @@ void disc_drive_sector_provider()
     CHECK(b.run(1) == CDBLOCK_EXIT_ERROR && contains(b.error(), "reset"));
 }
 
+// A subcode provider that records each frame address it is asked for and the symbols it is given,
+// and marks them with the address's low byte first and 2a last, or returns stop when it is set.
+struct Subcodes
+{
+    std::vector<uint32_t> frame_addresses;
+    std::vector<uint8_t> given;
+    int stop = 0;
+};
+
+int provide_subcode(void *user, uint32_t frame_address, uint8_t *symbols)
+{
+    auto &subcodes = *static_cast<Subcodes *>(user);
+    subcodes.frame_addresses.push_back(frame_address);
+    subcodes.given.assign(symbols, symbols + 96);
+    if (subcodes.stop)
+        return subcodes.stop;
+    symbols[0] = uint8_t(frame_address);
+    symbols[95] = 0x2a;
+    return 0;
+}
+
+// The block that starts at frames[first]: 98 frames, the first alone starting a block, frame k
+// k/98 of period after it, with symbols in frames 0 to 95 and the last again in 96 and 97. Null
+// symbols for zeros.
+bool block_sent(const std::vector<Peer::Frame> &frames, size_t first, uint64_t period, const uint8_t *symbols)
+{
+    if (first + 98 > frames.size())
+        return false;
+    for (size_t k = 0; k < 98; ++k)
+    {
+        const Peer::Frame &frame = frames[first + k];
+        if (frame.start != (k == 0) || frame.cycle != frames[first].cycle + period * k / 98 ||
+            frame.word != (symbols ? symbols[k < 96 ? k : 95] : 0))
+            return false;
+    }
+    return true;
+}
+
+void disc_drive_subcode()
+{
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    uint8_t written[96], other[96];
+    for (size_t i = 0; i < 96; ++i)
+    {
+        written[i] = uint8_t(i + 1); // past 3f too: the byte reaches the symbol word whole
+        other[i] = uint8_t(0x3f - i % 64);
+    }
+    Subcodes subcodes;
+    CHECK(cdblock_drive_disc_subcode(b, 1001, written) == -1 && contains(b.error(), "no disc"));
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_subcode, &subcodes) == -1 && contains(b.error(), "no disc"));
+    cdblock_drive_config config;
+    cdblock_drive_config_defaults(&config);
+    config.landing_frames = 0; // reads start at their frame address: this test checks what they send
+    config.seek_cycles = 0;
+    Peer peer(b, &config);
+    CHECK(cdblock_drive_disc_subcode(b, 1001, written) == 0 && cdblock_drive_disc_subcode(b, 1002, other) == 0);
+    CHECK(cdblock_drive_disc_sector_state(b, 1002, 1, CDBLOCK_SECTOR_MISSING, 0) == 0);
+    auto command = [&](Peer &to, uint8_t code, uint32_t frame_address, uint8_t speed) {
+        to.stage(code, frame_address, speed);
+        to.link_frame();
+        return to.link_frame();
+    };
+    // A paused drive sends no subcode, and neither does a seek as it arrives.
+    peer.link_frame();
+    CHECK(command(peer, 0x06, 1000, 1) == q(0x36, 1000) && peer.frames.empty());
+    // Five sector periods of the read at single speed, then a pause in the sixth: 98 frames a
+    // period, evenly spaced, the first of each starting a block. The pause ends the sixth block as
+    // the drive obeys it, 13 strobes into the period.
+    for (int i = 0; i < 5; ++i)
+        peer.link_frame();
+    peer.stage(0x08);
+    peer.link_frame();
+    const size_t sent = peer.frames.size();
+    peer.link_frame();
+    peer.link_frame();
+    CHECK(sent == 5 * 98 + 13 * strobe * 98 / single_speed + 1 && peer.frames.size() == sent);
+    // A sector without subcode sends zeros, a missing sector its subcode all the same.
+    CHECK(block_sent(peer.frames, 0, single_speed, nullptr) && block_sent(peer.frames, 98, single_speed, written));
+    CHECK(block_sent(peer.frames, 2 * 98, single_speed, other) &&
+          block_sent(peer.frames, 3 * 98, single_speed, nullptr));
+    CHECK(block_sent(peer.frames, 4 * 98, single_speed, nullptr));
+    for (size_t block = 1; block <= 5 && 98 * block < peer.frames.size(); ++block)
+        CHECK(peer.frames[98 * block].start &&
+              peer.frames[98 * block].cycle == peer.frames[98 * (block - 1)].cycle + single_speed);
+    const auto sectors = b.log(CDBLOCK_LOG_DRIVE_SECTOR);
+    CHECK(sectors.size() == 5 && sectors[1].address == 1001 && sectors[2].address == 1003);
+
+    // At double speed the frames come twice as fast. A provider sees the disc's symbols as each
+    // block starts, a missing sector's too, and what it changes is sent.
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_subcode, &subcodes) == 0);
+    peer.frames.clear();
+    CHECK(command(peer, 0x06, 1001, 2) == q(0x36, 1001) && peer.frames.empty() && subcodes.frame_addresses.empty());
+    peer.link_frame();
+    CHECK((subcodes.frame_addresses == std::vector<uint32_t>{1001}) &&
+          subcodes.given == std::vector<uint8_t>(written, written + 96));
+    peer.link_frame();
+    CHECK(subcodes.frame_addresses.back() == 1002 && subcodes.given == std::vector<uint8_t>(other, other + 96));
+    peer.link_frame();
+    CHECK(subcodes.frame_addresses.size() == 3 && subcodes.given == std::vector<uint8_t>(96, 0));
+    uint8_t marked[96];
+    std::copy(written, written + 96, marked);
+    marked[0] = uint8_t(1001);
+    marked[95] = 0x2a;
+    CHECK(block_sent(peer.frames, 0, double_speed, marked));
+    std::copy(other, other + 96, marked);
+    marked[0] = uint8_t(1002);
+    marked[95] = 0x2a;
+    CHECK(block_sent(peer.frames, 98, double_speed, marked));
+    CHECK(peer.frames.size() == 2 * 98 + 13 * strobe * 98 / double_speed + 1);
+    // A copy goes on with the block being sent, and asks the same provider for the next.
+    const auto starts = [](const Peer::Frame &frame) { return frame.start; };
+    cdblock_board *raw_copy = cdblock_clone(b);
+    CHECK(raw_copy != nullptr);
+    if (!raw_copy)
+        return;
+    {
+        Board copy(raw_copy);
+        Peer copied(copy, nullptr, false);
+        copied.link_frame();
+        CHECK(subcodes.frame_addresses.size() == 4 && subcodes.frame_addresses.back() == 1004);
+        CHECK(copied.frames.size() == 98 && !copied.frames.front().start &&
+              std::count_if(copied.frames.begin(), copied.frames.end(), starts) == 1);
+    }
+    // The board's reset ends the block. The provider and the disc's subcode stay.
+    CHECK(cdblock_reset(b) == 0);
+    sci0(b);
+    peer.frames.clear();
+    peer.link_frame();
+    CHECK(peer.frames.empty());
+    command(peer, 0x06, 1001, 2);
+    peer.link_frame();
+    CHECK(subcodes.frame_addresses.back() == 1001 && !peer.frames.empty() && peer.frames.front().start &&
+          peer.frames.front().word == uint8_t(1001));
+    // NULL gives the disc's own symbols again from the next block, and a new drive has neither
+    // provider nor subcode.
+    const size_t asked = subcodes.frame_addresses.size();
+    CHECK(cdblock_drive_disc_subcode_provider(b, nullptr, nullptr) == 0);
+    peer.frames.clear();
+    peer.link_frame();
+    const auto start = std::find_if(peer.frames.begin(), peer.frames.end(), starts);
+    CHECK(subcodes.frame_addresses.size() == asked && start != peer.frames.end() && start->word == other[0]);
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_subcode, &subcodes) == 0 &&
+          cdblock_drive_select_disc(b, &config) == 0);
+    command(peer, 0x06, 1001, 2);
+    peer.frames.clear();
+    peer.link_frame();
+    CHECK(subcodes.frame_addresses.size() == asked && !peer.frames.empty() && peer.frames.front().start &&
+          peer.frames.front().word == 0);
+    // A nonzero status fails the board, naming it and the frame address.
+    subcodes.stop = 5;
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_subcode, &subcodes) == 0);
+    peer.link_frame();
+    CHECK(peer.failed && contains(b.error(), "subcode provider stopped the run with status 5 at frame address 1002") &&
+          subcodes.frame_addresses.back() == 1002);
+    CHECK(b.run(1) == CDBLOCK_EXIT_ERROR && contains(b.error(), "reset"));
+}
+
+void disc_drive_subcode_interrupts()
+{
+    // IRQ7 follows the enables. Its handler clears the decoder's flags. With flag 5 enabled it is
+    // entered for each subcode frame, and with the header's flag alone once a sector, as a data read
+    // has it: the sectors arrive as before, and the frames raise flag 5 without an interrupt.
+    Program p;
+    p.poke_w(0x05ffff86, 0x0006); // IRQ7 at level 6
+    p.mov(0, 0);
+    p.ldc_sr(0);
+    p.nop();
+    const uint32_t loop = p.loop();
+    p.pool();
+    const uint32_t handler = p.here();
+    p.poke_w(0x0a000006, 0xff8f);
+    p.rte();
+    p.nop();
+    p.pool();
+    p.vector(71, handler);
+    for (const uint16_t enables : {uint16_t(0x0020), uint16_t(0x0010)})
+    {
+        Board b(p, &clocked);
+        cdblock_add_stop(b, loop);
+        CHECK(b.run() == CDBLOCK_EXIT_STOP);
+        cdblock_remove_stop(b, loop);
+        cdblock_drive_config config;
+        cdblock_drive_config_defaults(&config);
+        config.landing_frames = 0;
+        config.seek_cycles = 0;
+        Peer peer(b, &config);
+        peer.stage(0x06, 1000, 1);
+        peer.link_frame();
+        peer.link_frame();
+        peer.link_frame();
+        // Two sector periods with the CPU running and nothing answering the strobes.
+        b.write(0x0a00000a, 2, enables);
+        b.write(0x0a000006, 2, 0xff8f);
+        arm_channel0(b);
+        const size_t sectors = b.log(CDBLOCK_LOG_DRIVE_SECTOR).size();
+        CHECK(b.run(2 * single_speed) == CDBLOCK_EXIT_BUDGET);
+        size_t taken = 0;
+        for (const auto &entry : b.log(CDBLOCK_LOG_INTERRUPT))
+            taken += entry.value == 71;
+        CHECK(taken == (enables == 0x0020 ? size_t(2) * 98 : size_t(2)));
+        CHECK(b.log(CDBLOCK_LOG_DRIVE_SECTOR).size() == sectors + 2 && b.peek(0x09002000, 4) == 0x00132601);
+        CHECK(enables == 0x0020 || (b.peek(0x0a000006, 2) & 0x20));
+    }
+}
+
 void disc_drive_speed()
 {
     Program p;
@@ -1083,6 +1316,8 @@ const std::vector<Test> drive_tests = {
     {"disc drive commands", disc_drive_commands},
     {"disc drive ring seek provider", disc_drive_ring_provider},
     {"disc drive sector provider", disc_drive_sector_provider},
+    {"disc drive subcode stream", disc_drive_subcode},
+    {"disc drive subcode frames and IRQ7", disc_drive_subcode_interrupts},
     {"disc drive speed", disc_drive_speed},
     {"disc drive reset and copy", disc_drive_reset_and_clone},
     {"disc drive over a long advance", disc_drive_long_advance},

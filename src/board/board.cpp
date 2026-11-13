@@ -693,6 +693,16 @@ size_t Board::sector(const std::vector<uint8_t> &bytes, uint16_t status)
     return iface.decoder_transfer();
 }
 
+void Board::subcode(uint8_t symbol, bool block_start)
+{
+    // The interface holds the frame's symbol and raises its flag, with the block start's on a
+    // block's first frame. The byte goes into the symbol word whole, unconfirmed: what the chip
+    // holds above the six R to W bits is not known.
+    iface.subcode(symbol);
+    iface.decoder_flags(block_start ? uint16_t(Interface::SUBCODE_SYNC | Interface::SUBCODE_BLOCK)
+                                    : Interface::SUBCODE_SYNC);
+}
+
 void Board::note(Note kind, uint32_t address, uint32_t value, std::string text)
 {
     const LogKind entry = kind == Note::Command  ? LogKind::DriveCommand

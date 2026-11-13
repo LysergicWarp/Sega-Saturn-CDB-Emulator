@@ -251,7 +251,8 @@ Board devices, wired as the SH-1 board in the Saturn PAL service manual
 - Interface chip, from `0x0a000000`:
   - CR1..CR4, with separate latches for the command and the response.
   - The command flags (`0x0a000004`) and their enables, which raise IRQ6.
-  - The sector header and subcode sync flags (`0x0a000006`) and their enables, which raise IRQ7.
+  - The sector header, subcode sync and subcode block start flags (`0x0a000006`) and their enables,
+    which raise IRQ7.
   - The host interrupt flags (`0x0a00001e`).
   - The FIFO the SH-1 reads at the data port (`0x0a000000`), and host transfers on DMA channel 1.
   - Sector bytes on DMA channel 0 with the decoder status (`0x0a00001c`), and the subcode symbol
@@ -298,8 +299,8 @@ a separate unit on the serial link. Three implementations come with the library:
 - Without device timing or the clock nothing happens unless the caller raises it.
 - ITU external clocks, phase counting, synchronous operation and complementary or
   reset-synchronized PWM.
-- The optical drive's own electronics, disc images, CD audio, subcode,
-  MPEG decoding, the A/D converter, the timer pulse output and the watchdog's counting.
+- The optical drive's own electronics, disc images, CD audio, MPEG decoding, the A/D converter, the
+  timer pulse output and the watchdog's counting.
 - SCI0 in asynchronous mode, with an external clock, and receiving without transmitting. A transfer
   ends whole, so TDR's next byte and TEND come at its end, not as bit 7 goes out.
 - SCI0 with TE cleared, which on the chip sets TDRE and TEND and holds TDRE at 1 (sections 13.2.6
@@ -575,6 +576,29 @@ Sectors:
   bytes the drive would read, the written sector or the sync pattern and a mode 1 header, and may
   change them or fail the board. Missing sectors ask nothing.
 
+Subcode:
+
+- Each sector period the drive reads, it sends the sector's
+  [subcode block](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/subcode.md#frames)
+  to the interface chip: 98 frames, evenly spaced over the period, 7350 a second at single speed.
+- Each frame sets the symbol word (`0x0a000018`) and raises decoder flag 5. The first frame of a
+  block raises flag 6 with it. IRQ7 follows the enables the firmware wrote.
+- `cdblock_drive_disc_subcode` gives a sector its 96 symbols in disc order, R to W in the low six
+  bits of each byte. A sector without any sends zeros.
+- Frames 0 to 95 carry the symbols, each byte whole. Frames 96 and 97, the sync frames, leave the
+  last symbol in the word.
+- The stream runs on data reads as on audio, and for missing and unreadable sectors too. It stops
+  when the drive leaves the read: a pause, seek, stop or scan ends the block being sent.
+- A subcode provider set with `cdblock_drive_disc_subcode_provider` serves the symbols from the
+  caller as each block starts, under the sector provider's rules. It is asked for missing sectors
+  too.
+- The P and Q channels are not in the stream: the drive reports them over the link.
+- The fed drive sends no subcode. Its caller raises the flags and sets the symbol word.
+- Unconfirmed: whether a real drive streams while paused, seeking or scanning, whether the
+  interface chip sets flag 5 while its enable is clear, where a block's first frame falls against
+  the sector's header flag (here at the same time), what the sync frames carry, and what the symbol
+  word holds above the symbol.
+
 The landing:
 
 - A sector reaches DMA channel 0 as it arrives. The CDB105 firmware arms the channel only after the
@@ -776,8 +800,8 @@ has that name, as on Windows.
 - `scripts`: `ring.py` on its example files but `sectors.txt`, which needs a disc image, and
   `make.py`'s sectors, and `payload.py`'s card ROM and back, through their command lines.
 - `package`: `python -m cdblock` on each revision with no card and with each card, sectors put and
-  got, the lifecycle and module extensions as source, ELF, plain code and card ROM, and the command
-  line.
+  got, the lifecycle and module extensions as source, ELF, plain code and card ROM, the command
+  line, and the R-W subcode of an audio play through `20` (Get Subcode).
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 

@@ -105,7 +105,7 @@ void DiscDrive::reset(uint64_t now)
     speed = 2;
     toc_entry = 0;
     seeking = backward = false;
-    step_at = seek_until = 0;
+    step_at = seek_until = subcode_at = 0;
     next_tick = now + period();
 }
 
@@ -126,6 +126,8 @@ void DiscDrive::act(DrivePort &port)
             step_at = now + config.strobe_cycles;
         }
     }
+    if (subcode_at && now >= subcode_at)
+        frames(port, now);
     if (now >= next_tick)
     {
         tick(port, now);
@@ -155,6 +157,7 @@ void DiscDrive::tick(DrivePort &port, uint64_t now)
     {
         // Past the lead-out too: a disc can hold sectors there, as disc authentication's ring.
         deliver(port, position);
+        stream(port, position, now);
         if (position < last_frame_address)
             ++position;
     }
@@ -352,6 +355,7 @@ void DiscDrive::seek(uint32_t frame_address, Mode arrive, uint64_t now)
     target = std::min(frame_address, last_frame_address);
     arrival = arrive;
     seeking = true;
+    subcode_at = 0;
     seek_until = now + config.seek_cycles;
 }
 
@@ -369,6 +373,9 @@ void DiscDrive::halt(Mode next)
     // started, unconfirmed: where a real drive stops is not known.
     seeking = false;
     mode = next;
+    // The subcode block being sent ends here, unconfirmed: whether a real drive streams on outside
+    // a read is not known.
+    subcode_at = 0;
 }
 
 void DiscDrive::deliver(DrivePort &port, uint32_t frame_address)
@@ -402,6 +409,37 @@ void DiscDrive::deliver(DrivePort &port, uint32_t frame_address)
     if (status)
         std::snprintf(text, sizeof text, "status %04x", unsigned(status));
     port.note(DrivePort::Note::Sector, frame_address, uint32_t(moved), text);
+}
+
+void DiscDrive::stream(DrivePort &port, uint32_t frame_address, uint64_t now)
+{
+    // The subcode has lines of its own, so a missing or unreadable sector still sends its block.
+    const auto found = subcodes.find(frame_address);
+    block = found != subcodes.end() ? found->second : Subcode{};
+    if (subcode_provider)
+        if (const int stop = subcode_provider(frame_address, block.data()))
+            throw std::runtime_error("the subcode provider stopped the run with status " + std::to_string(stop) +
+                                     " at frame address " + std::to_string(frame_address));
+    block_at = now;
+    block_period = period();
+    block_frame = 0;
+    frames(port, now);
+}
+
+void DiscDrive::frames(DrivePort &port, uint64_t now)
+{
+    // Frame k comes k/98 of the sector period into the block. The two sync frames leave the last
+    // symbol on the lines, unconfirmed: the firmware stores the symbol again on them.
+    for (subcode_at = 0; block_frame < block_frames; ++block_frame)
+    {
+        const uint64_t at = block_at + block_period * block_frame / block_frames;
+        if (at > now)
+        {
+            subcode_at = at;
+            break;
+        }
+        port.subcode(block[std::min<size_t>(block_frame, block.size() - 1)], block_frame == 0);
+    }
 }
 
 }
