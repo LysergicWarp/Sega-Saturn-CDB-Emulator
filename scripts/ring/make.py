@@ -9,10 +9,15 @@ With DUMP alone, make.py writes the sectors full-check.txt runs on to the curren
 accepted.bin, short.bin and failing.bin.
 
 TIMER is an ITU4 counter value (hex), as for ring.py's timer command. It picks the three check
-positions. OUTPUT receives raw 2352-byte Mode 1 sectors from the first check position through the
-third, about 7 MB. The three sectors at check position i read as logo row zone + i in Gi of the
-106 columns (default 106). Bad columns hold the opposite byte and are spread across the row. All
+positions. OUTPUT receives raw 2352-byte sectors from the first check position through the third,
+about 7 MB. The three sectors at check position i read as logo row zone + i in Gi of the 106
+columns (default 106). Bad columns hold the opposite byte and are spread across the row. All
 other bytes re-scramble to 59, the background byte.
+
+Each sector has the sync pattern and a Mode 1 header, but it is not a valid Mode 1 sector: its
+EDC, ECC and zero fields hold bytes for the check like the rest. The comparison reads them as
+stream bytes and never as EDC or ECC. What a real decoder reports for such a sector is unknown.
+Another tool may reject the sectors.
 
 make.py prints the ring.py command that checks the file. CDB104, CDB105, CDB106 and YGR022 are
 recognized by SHA-1. For another dump, --shift gives the distance of its tables from their CDB105
@@ -25,6 +30,7 @@ examples:
 """
 
 import argparse
+import pathlib
 import sys
 
 from ring import (CLEAR, COMPARE_BYTES, COMPARE_START, LOGO_COLUMNS, SCRAMBLER, SECTOR,
@@ -103,6 +109,12 @@ def image(tables, check, counts):
     return bytes(data)
 
 
+def quoted(path):
+    """A path as a command line takes it, in quotes when it has a space."""
+    text = str(path)
+    return f'"{text}"' if " " in text else text
+
+
 def main():
     parser = argparse.ArgumentParser(
         usage=argparse.SUPPRESS, description=__doc__,
@@ -138,11 +150,14 @@ def main():
                       f"{counts[index]} good columns")
     except (Failure, OSError) as error:
         sys.exit(f"make.py: {error}")
+    # ring.py and full-check.txt by the path this script was run with, so the command works from
+    # the same folder.
+    here = pathlib.Path(sys.argv[0]).parent
     print("check it with:")
     if options.timer is None:
-        print(f"  ring.py {options.dump} full-check.txt")
+        print(f"  python {quoted(here / 'ring.py')} {quoted(options.dump)} {quoted(here / 'full-check.txt')}")
     else:
-        print(f'  ring.py {options.dump} -c "timer {timer:04x}; '
+        print(f'  python {quoted(here / "ring.py")} {quoted(options.dump)} -c "timer {timer:04x}; '
               f'image {output} {msf(first)}; pass; pass; pass"')
 
 

@@ -2,6 +2,10 @@ build/
 __pycache__/
 dumps/*
 !dumps/README.md
+# What scripts/ring/make.py writes to the folder it runs from
+accepted.bin
+short.bin
+failing.bin
 # What the example scenarios write to the folder they run from
 /decompress-input.prs
 /decompress-output.bin

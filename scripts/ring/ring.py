@@ -15,6 +15,9 @@ comment. File paths in commands are relative to the current directory. CDB104, C
 YGR022 are recognized by SHA-1. For another dump, --shift gives the distance of its tables from
 their CDB105 addresses.
 
+Positions print as MM:SS:FF and as an LBA. An LBA is the frame address less 150, so 00:02:00,
+frame address 150, is LBA 0.
+
 commands:
   logo                  print the logo bitmap with its row numbers
   timer VALUE           start a check from an ITU4 counter value (hex): the zone, the column,
@@ -41,6 +44,7 @@ examples, next to this script:
 import argparse
 import hashlib
 import inspect
+import os
 import sys
 
 # SHA-1 of each known dump, and the distance of its tables from their CDB105 addresses.
@@ -203,13 +207,42 @@ def where(frame_address):
 
 
 def address(text):
+    """The frame address an LBA or MM:SS:FF names. An LBA is at least -150, frame address 0."""
     try:
         if ":" in text:
             minutes, seconds, frames = (int(part) for part in text.split(":"))
+            if minutes < 0 or not 0 <= seconds < 60 or not 0 <= frames < 75:
+                raise ValueError
             return (minutes * 60 + seconds) * 75 + frames
-        return int(text) + 150
+        frame_address = int(text) + 150
+        if frame_address < 0:
+            raise ValueError
+        return frame_address
     except ValueError:
         raise Failure(f"{text} is not an LBA or MM:SS:FF") from None
+
+
+def three_sectors(path, index, source):
+    """The three raw sectors from sector `index` of the file at `path`, read on their own."""
+    if 0 <= index and (index + 3) * SECTOR <= os.path.getsize(path):
+        with open(path, "rb") as file:
+            file.seek(index * SECTOR)
+            data = file.read(3 * SECTOR)
+        if len(data) == 3 * SECTOR:
+            return [data[s * SECTOR:(s + 1) * SECTOR] for s in range(3)]
+    raise Failure(f"three sectors from {source} are out of range")
+
+
+def script_lines(path):
+    """The lines of a command file: UTF-8 with or without a byte order mark, or UTF-16 with one,
+    as Windows PowerShell's > writes it."""
+    with open(path, "rb") as file:
+        data = file.read()
+    encoding = "utf-16" if data[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    try:
+        return data.decode(encoding).splitlines()
+    except UnicodeDecodeError:
+        raise Failure(f"{path} is not UTF-8 or UTF-16 text") from None
 
 
 def hexadecimal(text, limit):
@@ -293,6 +326,9 @@ class Session:
         if check.seek == 4:
             raise Failure("all four seeks are done")
         phase, word = check.seek, hexadecimal(word, 0xFFFF)
+        if report and len(report) != 4:
+            raise Failure("the report bytes are a, b, c and d: give all four or none")
+        report = [hexadecimal(value, 0xFF) for value in report]
         target = check.targets[phase] + RETRY_FRAMES * check.retries
         head = f"seek {phase} to {msf(target)}: word {word:04x}"
         if word in (0, 0xFFFF):
@@ -303,11 +339,11 @@ class Session:
             else:
                 print(f"{head}. The drive seeks again {RETRY_FRAMES} frames further on")
             return
+        if phase >= 2 and not report:
+            raise Failure(f"seek {phase} needs the report bytes a, b, c and d")
         check.retries = 0
         if phase >= 2:
-            if len(report) != 4:
-                raise Failure(f"seek {phase} needs the report bytes a, b, c and d")
-            a, b, c, d = (hexadecimal(value, 0xFF) for value in report)
+            a, b, c, d = report
             head += f", bytes {a:02x} {b:02x} {c:02x} {d:02x}"
             if b < a // 2 or d < c // 2:
                 check.ended = True
@@ -315,8 +351,13 @@ class Session:
                       "The check ends with 3")
                 return
         if phase in SEEK_LIMITS:
-            distance, limit = abs(word - check.kept), SEEK_LIMITS[phase]
+            # The firmware reads the kept word back sign-extended and compares unsigned, so a
+            # kept word of 8000 or above is some four billion away from any new word.
+            kept = check.kept | 0xFFFF0000 if check.kept & 0x8000 else check.kept
+            distance, limit = abs(word - kept), SEEK_LIMITS[phase]
             head += f", {distance:,} from {check.kept:04x}"
+            if kept != check.kept:
+                head += ", which is read back sign-extended"
             if distance > limit:
                 check.ended = True
                 print(f"{head}, more than {limit}. The check ends with 3")
@@ -329,10 +370,9 @@ class Session:
 
     def command_image(self, path, first):
         first = address(first)
-        with open(path, "rb") as file:
-            data = file.read()
-        self.image = (data, first)
-        print(f"image {path}: {len(data) // SECTOR:,} sectors from {where(first)}")
+        sectors = os.path.getsize(path) // SECTOR
+        self.image = (path, first)
+        print(f"image {path}: {sectors:,} sectors from {where(first)}")
 
     def command_pass(self, path=None, first="0"):
         check = self.started()
@@ -340,19 +380,15 @@ class Session:
         if path is None:
             if self.image is None:
                 raise Failure("pass needs a file or an image")
-            data, start = self.image
+            path, start = self.image
             index = position - start
             source = f"the image at sector {index:,}"
         else:
-            with open(path, "rb") as file:
-                data = file.read()
             if not first.isdigit():
                 raise Failure(f"{first} is not a sector index")
             index = int(first)
             source = f"{path} at sector {index:,}"
-        if index < 0 or len(data) < (index + 3) * SECTOR:
-            raise Failure(f"three sectors from {source} are out of range")
-        sectors = [data[(index + s) * SECTOR:(index + s + 1) * SECTOR] for s in range(3)]
+        sectors = three_sectors(path, index, source)
         row = check.zone + check.passes
         walk = Walk(interleave(sectors, self.tables), row, self.tables)
         expected = "".join("#" if self.tables.bit(row, c) else " " for c in range(LOGO_COLUMNS))
@@ -393,8 +429,7 @@ def main():
         if options.commands is not None:
             lines = options.commands.split(";")
         elif options.script is not None:
-            with open(options.script) as file:
-                lines = file.read().splitlines()
+            lines = script_lines(options.script)
         else:
             lines = sys.stdin
     except (Failure, OSError) as error:

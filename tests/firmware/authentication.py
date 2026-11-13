@@ -5,12 +5,13 @@ one booted board.
   band, one setting at a time: result 4 at the last value inside, the band's failure at the first
   value outside. The bands are what the firmware accepts, not what a drive does. Reads land at the
   default landing, 4 frames early.
-- Seven cases at the defaults and at every corner of the zone, where each setting sits at either
+- Eight cases at the defaults and at every corner of the zone, where each setting sits at either
   edge of its range there: the control (4), no Saturn header in the scan (2, the disc still read),
-  seek answers failing (3, the first seek tried three times 206 frames apart), passing answers with
-  84 good logo columns (3) and with 85 (4), missing sectors after the scan (3, the firmware's read
-  error, well before the timeout) and frame addresses after the scan the drive never reaches (3 at
-  the timeout).
+  seek answers failing (3, the first seek tried three times 206 frames apart), equal seek words of
+  8000 (3 at the second seek, the kept word read back sign-extended), passing answers with 84 good
+  logo columns (3) and with 85 (4), missing sectors after the scan (3, the firmware's read error,
+  well before the timeout) and frame addresses after the scan the drive never reaches (3 at the
+  timeout).
 - Each run is recorded in authentication/ under the output directory: its settings, its disc, the seek
   answers given, the drive's log and E1's answer, enough to replay it.
 """
@@ -67,6 +68,8 @@ CASES = [
     ("control", lambda image: Disc(image), 4, None, None),
     ("no header", lambda image: no_header(image), 2, lambda r: r.get("read") == "the disc's data", "the disc read after"),
     ("seek answers failing", lambda image: Disc(image, seeks=failing()), 3, failing_seeks, "three tries of the first seek"),
+    ("seek words of 8000", lambda image: Disc(image, seeks=passing(word=0x8000)), 3,
+     lambda r: len(r["seeks"]) == 2, "ended at the second seek"),
     ("too few logo matches", lambda image: Disc(image, seeks=passing(), logo=84), 3, None, None),
     ("enough logo matches", lambda image: Disc(image, seeks=passing(), logo=85), 4, None, None),
     ("sectors missing after the scan", lambda image: stalled(image, "missing"), 3,

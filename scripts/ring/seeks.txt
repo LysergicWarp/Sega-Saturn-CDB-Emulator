@@ -33,7 +33,13 @@ timer 0145
 seek 1000
 seek 1013
 
-# The distance does not wrap around: fff0 and 0004 are 65,516 apart.
+# The distance does not wrap around: 0004 and 7ff0 are 32,748 apart.
+timer 0145
+seek 0004
+seek 7ff0
+
+# A kept word of 8000 or above is read back sign-extended, which fails the check whatever word
+# follows: fff0 and 0004 are 4,294,967,276 apart.
 timer 0145
 seek fff0
 seek 0004
