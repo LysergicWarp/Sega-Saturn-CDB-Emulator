@@ -448,7 +448,8 @@ cycles without instructions, as time that passes while the CPU waits.
 - SCI1's serial frames take their bit times ([the serial line](#the-serial-line)).
 - `cdblock_clock_next` gives the cycles until the next event that can raise an enabled interrupt,
   or the disc drive's next action. A caller that knows the CPU is idle can advance by that much
-  instead of running instructions. The library never decides that by itself.
+  instead of running instructions. The library never decides that by itself. Each subcode frame
+  of a read is a drive action, 98 a sector period, whether or not flag 5 is enabled.
 - A channel started with an external clock, in phase counting, synchronous operation, or
   complementary or reset-synchronized PWM counts nothing and is a strict check.
 

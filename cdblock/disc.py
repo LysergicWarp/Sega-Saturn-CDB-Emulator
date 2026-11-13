@@ -3,9 +3,10 @@
 The drive is the library's disc drive: it answers the SH-1's link commands by itself on the board's
 clock, a link frame with a report each sector period, the sectors of a read through the decoder
 input and DMA channel 0. The host waits on what the SH-1 writes, skipping the clock on at the
-firmware's idle loop, so the idle time skipped while it waits for a seek or a sector costs no
-instructions. Nothing here names a firmware address, but the idle loop needs a profile: on any other
-dump the disc operations are not supported.
+firmware's idle loop to the board's next event, so the idle time it skips costs no instructions.
+While the drive reads, each subcode frame it sends is such an event and costs one pass of the idle
+loop, 97 a sector besides the sector itself. Nothing here names a firmware address, but the idle
+loop needs a profile: on any other dump the disc operations are not supported.
 
 By default the disc has one data track from 00:02:00 with a Saturn header at its first frame
 address. Its tracks, the header's frame address and sectors that are missing or unreadable can be
