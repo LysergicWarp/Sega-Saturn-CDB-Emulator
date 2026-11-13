@@ -9,13 +9,13 @@ loop, 97 a sector besides the sector itself. Nothing here names a firmware addre
 loop needs a profile: on any other dump the disc operations are not supported.
 
 By default the disc has one data track from 00:02:00 with a Saturn header at its first frame
-address. Its tracks, the header's frame address and sectors that are missing or unreadable can be
-set. It always holds disc authentication's ring at every check position, the sectors that
-scripts/ring/make.py builds from the dump's own tables. Which positions a check reads follows from
-the ITU4 count when the firmware recognizes the header, so the ring is there for any count, as on a
-pressed disc. The drive answers each authentication seek as Yabause's emulation does, with values
-that pass the seek checks, unless the disc has seek answers of its own: failing, passing or
-scripted, below.
+address. Its tracks, the header's frame address, sectors that are missing or unreadable and each
+sector's R-W subcode can be set. It always holds disc authentication's ring at every check
+position, the sectors that scripts/ring/make.py builds from the dump's own tables. Which positions a
+check reads follows from the ITU4 count when the firmware recognizes the header, so the ring is
+there for any count, as on a pressed disc. The drive answers each authentication seek as Yabause's
+emulation does, with values that pass the seek checks, unless the disc has seek answers of its own:
+failing, passing or scripted, below.
 
 None of the drive's behaviour comes from a real drive. Its reports follow what the firmware
 accepts, its seek answers are Yabause's or the disc's own and its timing is the library's defaults
@@ -31,7 +31,7 @@ from .host import EFLS, ESEL, PEND, REJECT, RunError
 _ring = _scripts.load("ring", "ring")
 _make = _scripts.load("ring", "make", ring=_ring)
 
-SECTOR, DATA = 2352, 2048
+SECTOR, DATA, SUBCODE = 2352, 2048, 96
 FIRST = 150             # 00:02:00, the data track's first frame address
 LEAD_OUT = 283_800      # 63:04:00, the latest Sega's disc format standard allows
 DATA_TRACK = 0x41       # the control/ADR byte of a data track: bit 6 data, ADR 1
@@ -140,6 +140,7 @@ class Disc:
         # (frame address, count, state, decoder status) in order, as the drive takes them.
         self.states = []
         self.sectors = {}
+        self.subcodes = {}
         if header is not None:
             self.sectors[header] = sector(header, data=IDENTIFIER + MAKER + PRODUCT)
         for row in range(RING_ROWS):
@@ -159,6 +160,14 @@ class Disc:
             self.sectors[frame_address + k] = sector(frame_address + k, mode, submode,
                                                      data[k * DATA:(k + 1) * DATA])
         return count
+
+    def write_subcode(self, frame_address, symbols):
+        """The R-W subcode of the sector at frame_address: its 96 symbols in disc order, R to W in
+        the low six bits of each. A sector without any sends zeros. Before insert, as write."""
+        symbols = bytes(symbols)
+        if len(symbols) != SUBCODE:
+            raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
+        self.subcodes[frame_address] = symbols
 
     def missing(self, frame_address, count=1):
         """count frames from frame_address on hold no sector: the drive passes them with nothing to
@@ -223,6 +232,8 @@ class Drive:
             board.drive_disc_sector(frame_address, raw)
         for frame_address, count, state, status in disc.states:
             board.drive_disc_sector_state(frame_address, count, state, status)
+        for frame_address, symbols in disc.subcodes.items():
+            board.drive_disc_subcode(frame_address, symbols)
         if disc.seeks is not None:
             board.drive_disc_ring_provider(disc.seeks)
         self.disc = disc

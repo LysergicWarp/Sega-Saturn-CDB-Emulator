@@ -355,20 +355,20 @@ def get_subcode(host):
 
 def subcode_board(image):
     """A board for a subcode play, with its host and the disc for its drive: a data track, then the
-    audio track."""
+    audio track, with the generated packs as its subcode around the frames played."""
     bd = board(image, flags=HARNESS_FLAGS)
     strict.apply(bd, PROFILES["cdb105"], None)
     host = Host(bd, idle=PROFILES["cdb105"].IDLE)
-    return bd, host, Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK)))
+    disc = Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK)))
+    for n in range(PLAY_SECTORS + 2 * SUBCODE_MARGIN):
+        disc.write_subcode(PLAY_FRAME_ADDRESS - SUBCODE_MARGIN + n, rw.sector(n))
+    return bd, host, disc
 
 
 def insert_subcode(host, disc):
-    """04's R-W setting on, then the disc in the drive with the generated packs around the frames
-    played. The board takes the subcode after the insert, which selects the drive again."""
+    """04's R-W setting on, then the disc in the drive, which takes the disc's subcode with it."""
     host.command([0x0402, 0xFFFF, 0, 0xFFFF], name="04 R-W subcode on")
     Drive(host).insert(disc)
-    for n in range(PLAY_SECTORS + 2 * SUBCODE_MARGIN):
-        host.board.drive_disc_subcode(PLAY_FRAME_ADDRESS - SUBCODE_MARGIN + n, rw.sector(n))
 
 
 def read_packs(host, packs):
@@ -424,6 +424,11 @@ def check_subcode(suite, dumps):
     the drive pauses, which ends the frames: the decoded packs still come, then none."""
     case = suite.case("cdb105 subcode")
     bd, host, disc = subcode_board(dumps.rom("cdb105"))
+    try:
+        disc.write_subcode(PLAY_FRAME_ADDRESS, b"short")
+        case.check(False, "the disc took subcode of the wrong length")
+    except ValueError as error:
+        case.check("96 symbols" in str(error), f"raised {error}")
     try:
         host.boot()
         insert_subcode(host, disc)
