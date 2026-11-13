@@ -1015,7 +1015,8 @@ void disc_drive_subcode()
     marked[0] = uint8_t(1002);
     marked[95] = 0x2a;
     CHECK(block_sent(peer.frames, 98, double_speed, marked));
-    CHECK(peer.frames.size() == 2 * 98 + 13 * strobe * 98 / double_speed + 1);
+    const size_t part = 13 * strobe * 98 / double_speed + 1;
+    CHECK(peer.frames.size() == 2 * 98 + part);
     // A copy goes on with the block being sent, and asks the same provider for the next.
     const auto starts = [](const Peer::Frame &frame) { return frame.start; };
     cdblock_board *raw_copy = cdblock_clone(b);
@@ -1030,12 +1031,34 @@ void disc_drive_subcode()
         CHECK(copied.frames.size() == 98 && !copied.frames.front().start &&
               std::count_if(copied.frames.begin(), copied.frames.end(), starts) == 1);
     }
-    // The board's reset ends the block. The provider and the disc's subcode stay.
+    // A seek ends the block as the drive obeys it, 13 strobes into the period, and none is sent
+    // while the drive seeks. A read sent again starts with a whole block at its frame address.
+    peer.stage(0x06, 1001, 2);
+    peer.link_frame();
+    size_t cut = peer.frames.size();
+    peer.link_frame();
+    CHECK(cut == 3 * 98 + part && peer.frames.size() == cut);
+    peer.link_frame();
+    CHECK(peer.frames.size() == cut + part && peer.frames[cut].start && peer.frames[cut].word == uint8_t(1001));
+    // A seek that arrives paused ends it the same way, for good.
+    peer.stage(0x09, 1000, 0);
+    peer.link_frame();
+    cut = peer.frames.size();
+    peer.link_frame();
+    peer.link_frame();
+    CHECK(cut == 4 * 98 + 2 * part && peer.frames.size() == cut);
+    // The board's reset ends the block, in a read here. The clock starts again, and nothing is sent
+    // once it passes the cycle that block would have ended at. The provider and the disc's subcode
+    // stay.
+    command(peer, 0x06, 1003, 2);
+    peer.link_frame();
+    const uint64_t block_end = cdblock_clock_cycles(b) + double_speed;
     CHECK(cdblock_reset(b) == 0);
     sci0(b);
     peer.frames.clear();
-    peer.link_frame();
-    CHECK(peer.frames.empty());
+    for (int i = 0; i < 100 && cdblock_clock_cycles(b) < block_end; ++i)
+        peer.link_frame();
+    CHECK(cdblock_clock_cycles(b) >= block_end && peer.frames.empty());
     command(peer, 0x06, 1001, 2);
     peer.link_frame();
     CHECK(subcodes.frame_addresses.back() == 1001 && !peer.frames.empty() && peer.frames.front().start &&
