@@ -49,20 +49,24 @@ None has run on a console.
 
 1. Assemble for big-endian SH-1 and link at `0x0907b000`, where the expansion loader decodes.
    The other examples build the same way as `lifecycle-extension.s`, from the repository's top
-   folder too:
+   folder too. The files go to `build/`, which Git ignores. Create it if no build has:
 
    ```
-   sh-elf-as --big --isa=sh -o lifecycle-extension.o examples/lifecycle-extension.s
-   sh-elf-ld --no-relax -T examples/lifecycle-extension.ld -o lifecycle-extension.elf lifecycle-extension.o
-   sh-elf-objcopy -O binary lifecycle-extension.elf lifecycle-extension.bin
+   sh-elf-as --big --isa=sh -o build/lifecycle-extension.o examples/lifecycle-extension.s
+   sh-elf-ld --no-relax -T examples/lifecycle-extension.ld -o build/lifecycle-extension.elf build/lifecycle-extension.o
+   sh-elf-objcopy -O binary build/lifecycle-extension.elf build/lifecycle-extension.bin
    ```
+
+   The `Dockerfile`'s binutils are not on PATH. Run them by their path,
+   `build/binutils/linux/sh-elf-as` or `build/binutils/windows/sh-elf-as.exe`, and the other two
+   likewise.
 
 2. Build the card ROM with [`payload.py`](../scripts/payload/payload.py): the encoded length as a
    big-endian longword at offset 0, then the payload the firmware's decoder accepts, encoded as the
    [decoder guide][docs-encoding] describes, at most `0x5000` bytes.
 
    ```
-   python scripts/payload/payload.py card lifecycle-extension.bin lifecycle-card.bin
+   python scripts/payload/payload.py card build/lifecycle-extension.bin build/lifecycle-card.bin
    ```
 
 3. Put it on card hardware the firmware accepts: present at reset, passing the

@@ -409,8 +409,9 @@ Both are behavioural, since the card's timing and the FIFO's control bits are no
 gives the FIFO's depth. The timing stands still while the CPU sleeps, and the caller's other device
 events work as without it.
 
-The transfer control register (`0x0a000002`) sets the transfer up. Bit 2 enables it, bit 0 sets
-its direction from the host, and bit 1 resets the FIFO.
+The transfer control register (`0x0a000002`) sets the transfer up. In the emulator's model bit 2
+enables it, bit 0 sets its direction from the host, and bit 1 resets the FIFO. The bits are
+unconfirmed on a real chip.
 
 With or without device timing, the FIFO keeps its last `CDBLOCK_FIFO_WORDS` words by position, as
 Ymir and Yabause model the chip. This is unconfirmed on a real chip.
@@ -532,7 +533,8 @@ Drive commands, each taking effect when its link frame ends:
   `02` is the ring seek, `08` pauses, `04` stops, and `0a` and `0b` scan forward and backward.
 - `05` (standby) stops as `04` does, and `0c` (open tray) opens the tray for good. What the two do
   in a real drive is unknown, so both are unconfirmed.
-- Byte 10 at 1 or 2 sets single or double speed.
+- Byte 10 at 1 or 2 sets single or double speed. Whether a real drive takes the byte as its speed
+  is unknown, so this is unconfirmed.
 - A command with a bad sum, or after the tray opened, is logged and not obeyed. An unknown command
   fails the board.
 
@@ -683,6 +685,16 @@ docker run --rm -v "$PWD:/src" --user "$(id -u):$(id -g)" cdblock-build make for
 docker run --rm -v "${PWD}:/src" cdblock-build make format                            # Windows, PowerShell
 ```
 
+The tests run in it the same way, under the sanitizers:
+
+```
+docker run --rm -v "$PWD:/src" --user "$(id -u):$(id -g)" cdblock-build make test   # Linux
+docker run --rm -v "${PWD}:/src" cdblock-build make test                            # Windows, PowerShell
+```
+
+Its objects go to `build/sanitized/` in the mounted folder, where a sanitized build outside the
+image would take them for its own. Run `make clean` before that build.
+
 It has clang-tidy as well, with its checks in `.clang-tidy`. On Linux and in PowerShell alike:
 
 ```
@@ -737,6 +749,10 @@ python -m cdblock --firmware dumps/cdb105.bin --card dumps/mpeg-card/vcd.bin
 - `--extension` takes card code as `.s`, assembled with the binutils `CDBLOCK_BINUTILS` names, the
   first of `sh-elf-` and `sh2eb-elf-` on PATH or the Dockerfile's in `build/binutils/`, as `.elf`
   or as `.bin`, and encodes it into a card ROM. `--card` takes a card ROM already encoded.
+- `--trace FILE` writes every instruction the SH-1 runs to FILE.
+- In the transcript, `words` counts the words a transfer moved through the FIFO, on the `06` step
+  that ends it. `sectors` on that step is the transfer's sector count as its command gave it, and
+  on a `cdblock.disc` drive step the sectors the drive handed over.
 - A dump of CDB104, CDB105, CDB106 or YGR022, known by its SHA-1, runs strict with its profile: its
   code ranges, and the idle loop where the host lets the clock skip ahead while the firmware
   waits. Any other dump runs lenient.
@@ -745,7 +761,8 @@ python -m cdblock --firmware dumps/cdb105.bin --card dumps/mpeg-card/vcd.bin
 
 [`payload.py`](scripts/payload/payload.py) encodes and decodes extension payloads and card ROMs.
 In [`scripts/ring/`](scripts/ring/), `ring.py` replays disc authentication's checks and `make.py`
-builds the sectors they read.
+builds the sectors they read. Both print positions as MM:SS:FF and as an LBA, the frame address
+less 150.
 
 ## Firmware tests
 
