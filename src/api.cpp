@@ -471,7 +471,7 @@ int cdblock_drive_disc_sector(cdblock_board *b, uint32_t frame_address, const ui
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (count != 2352)
         return fail(b, "a raw sector is 2352 bytes");
     disc->write_sector(frame_address, std::vector<uint8_t>(raw, raw + count));
@@ -482,7 +482,7 @@ int cdblock_drive_disc_tracks(cdblock_board *b, const cdblock_track *tracks, siz
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (!tracks && count)
         return fail(b, "no tracks given");
     std::vector<cdblock::Track> list;
@@ -500,7 +500,7 @@ int cdblock_drive_disc_sector_state(cdblock_board *b, uint32_t frame_address, ui
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (count == 0 || frame_address > cdblock::DiscDrive::last_frame_address ||
         count > cdblock::DiscDrive::last_frame_address + 1 - frame_address)
         return fail(b, "the frame addresses lie from 0 to 449999, at least one");
@@ -522,7 +522,7 @@ int cdblock_drive_disc_ring_provider(cdblock_board *b, cdblock_ring_provider pro
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (!provider)
     {
         disc->set_ring_provider(nullptr);
@@ -543,7 +543,7 @@ int cdblock_drive_disc_sector_provider(cdblock_board *b, cdblock_sector_provider
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (!provider)
     {
         disc->set_sector_provider(nullptr);
@@ -558,7 +558,7 @@ int cdblock_drive_disc_subcode(cdblock_board *b, uint32_t frame_address, const u
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (!symbols)
         return fail(b, "no subcode given");
     cdblock::Subcode subcode;
@@ -571,7 +571,7 @@ int cdblock_drive_disc_subcode_provider(cdblock_board *b, cdblock_subcode_provid
 {
     auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
     if (!disc)
-        return fail(b, "the drive has no disc");
+        return fail(b, "the drive is not the disc drive");
     if (!provider)
     {
         disc->set_subcode_provider(nullptr);
@@ -579,6 +579,27 @@ int cdblock_drive_disc_subcode_provider(cdblock_board *b, cdblock_subcode_provid
     }
     disc->set_subcode_provider(
         [provider, user](uint32_t frame_address, uint8_t *symbols) { return provider(user, frame_address, symbols); });
+    return 0;
+}
+
+int cdblock_drive_disc_tray(cdblock_board *b, int open)
+{
+    auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
+    if (!disc)
+        return fail(b, "the drive is not the disc drive");
+    disc->set_tray(open != 0);
+    b->board->drive_moved();
+    return 0;
+}
+
+int cdblock_drive_disc_present(cdblock_board *b, int present)
+{
+    auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
+    if (!disc)
+        return fail(b, "the drive is not the disc drive");
+    if (!disc->tray_opened())
+        return fail(b, "the tray is closed, and the disc goes in or out only while it is open");
+    disc->set_disc(present != 0);
     return 0;
 }
 

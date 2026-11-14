@@ -13,7 +13,7 @@ namespace
 
 // The report status bytes, the command bytes and where their fields start, by the tables in disc.h.
 constexpr uint8_t toc_status = 0x04, stopped = 0x12, seek_status = 0x22, playing = 0x36, paused = 0x46, scanning = 0x56,
-                  tray_open = 0x80, ring = 0xb6;
+                  tray_open = 0x80, no_disc = 0x83, ring = 0xb6;
 constexpr uint8_t cmd_none = 0x00, cmd_ring_seek = 0x02, cmd_toc = 0x03, cmd_stop = 0x04, cmd_standby = 0x05,
                   cmd_play = 0x06, cmd_pause = 0x08, cmd_seek = 0x09, cmd_scan_forward = 0x0a, cmd_scan_backward = 0x0b,
                   cmd_open_tray = 0x0c;
@@ -98,15 +98,52 @@ const DiscDrive::Span *DiscDrive::span_at(uint32_t frame_address) const
     return nullptr;
 }
 
-void DiscDrive::reset(uint64_t now)
+void DiscDrive::start()
 {
-    mode = arrival = Mode::Paused;
+    mode = arrival = present ? Mode::Paused : Mode::Empty;
     position = target = first_track_start;
     speed = 2;
     toc_entry = 0;
     seeking = backward = false;
-    step_at = seek_until = subcode_at = 0;
+    seek_until = subcode_at = 0;
+}
+
+void DiscDrive::reset(uint64_t now)
+{
+    // The tray is not the board's to move, so an open one stays open, unconfirmed: whether a real
+    // drive reports its open tray from the first link frame after a reset is not known.
+    const bool open = tray_opened();
+    start();
+    if (open)
+        mode = Mode::Open;
+    step_at = 0;
     next_tick = now + period();
+}
+
+void DiscDrive::set_tray(bool open)
+{
+    if (open == tray_opened())
+        return;
+    // The link frames go on at their times either way. A real drive spins up and looks for a disc
+    // after its tray closes, and what it reports until it has found one or given up is not known.
+    // Here the next link frame already reports paused at the first frame address, or no disc:
+    // both unconfirmed.
+    if (open)
+        halt(Mode::Open);
+    else
+        start();
+}
+
+void DiscDrive::set_disc(bool in)
+{
+    present = in;
+    if (in)
+        return;
+    tracks = {data_track};
+    lead_out = latest_lead_out;
+    sectors.clear();
+    subcodes.clear();
+    spans.clear();
 }
 
 void DiscDrive::act(DrivePort &port)
@@ -262,8 +299,12 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
         case Mode::Stopped:
             b[report_status] = stopped;
             break;
+        // Both with zeros after the status, unconfirmed.
         case Mode::Open:
             b[report_status] = tray_open;
+            break;
+        case Mode::Empty:
+            b[report_status] = no_disc;
             break;
         case Mode::Ring:
             b[report_status] = ring;
@@ -298,10 +339,16 @@ void DiscDrive::obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_
     }
     if (command == cmd_none)
         return;
-    // The tray stays open: nothing closes it again.
+    // An open tray obeys nothing until the caller closes it, and a drive without a disc only the
+    // tray's opening, unconfirmed: what a real drive obeys in either state is not known.
     if (mode == Mode::Open)
     {
         note(", the tray open, not obeyed");
+        return;
+    }
+    if (mode == Mode::Empty && command != cmd_open_tray)
+    {
+        note(", no disc, not obeyed");
         return;
     }
     note("");

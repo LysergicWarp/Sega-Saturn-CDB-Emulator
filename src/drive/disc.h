@@ -18,6 +18,18 @@
 // streams while paused, seeking or scanning, where a block's first frame falls against the
 // sector's header, and what the sync frames carry.
 //
+// The tray and the disc are the caller's: a tray that opens and closes, and a disc that goes in or
+// out while it is open. Opening stops the drive where it is. It then reports the open tray and
+// obeys nothing until the tray closes. Closing with a disc starts the drive as at power-on, paused
+// at the first frame address at double speed, which makes the firmware read the TOC. Closing
+// without one reports no disc, and the drive then obeys only command 0c. The link frames keep
+// their times through both, and the board's reset moves neither the tray nor the disc.
+// Unconfirmed: the reports of a real drive after its tray closes, their order and how long each
+// lasts, as a drive has to spin up and look for a disc before it can report either. Here the
+// first link frame after the close already does. Also what a drive without a disc obeys, the
+// bytes after the status in the open tray and no disc reports, and whether a real drive whose
+// tray is open reports it from its first link frame after a reset.
+//
 // The reports follow what the firmware accepts, the ring seek answers are Yabause's unless the
 // caller's provider gives others, providers can serve the disc's sectors and subcode, and the
 // timing is configurable: none of it is confirmed on a real drive.
@@ -42,9 +54,10 @@
 // time, or for points A0 and A1 the track number in byte 8.
 //
 // The firmware acts on the status byte's code, bits 7..4, and for code 8 on the low nibble too: 80,
-// 81 and 83 pick drive states of their own, 80 the open tray's, and 88..8f an error. Bit 2 marks a
-// report with a position. Bit 1 follows Yabause's status values and bit 3 is never set: what
-// either means is unknown.
+// 81 and 83 pick drive states of their own, 80 the open tray's and 83 the missing disc's, and
+// 88..8f an error. This drive never sends 81 or 82: what they mean to a drive is unknown. Bit 2
+// marks a report with a position. Bit 1 follows Yabause's status values and bit 3 is never set:
+// what either means is unknown.
 //
 //   Status  Report
 //   04      TOC entry
@@ -54,6 +67,7 @@
 //   46      Paused
 //   56      Scanning: the firmware's code 5, with the low bits of 36 and 46
 //   80      Tray open, no position
+//   83      No disc, no position
 //   b6      Ring seek
 //
 //   Byte   Command
@@ -63,7 +77,7 @@
 //          track in 8. This drive ignores them
 //   10     Speed, 1 single and 2 double, any other value keeping it
 //
-// What 05 and 0c do in a real drive is unknown.
+// What 05 and 0c do in a real drive is unknown, 0c above all in one whose lid opens by hand.
 //
 //   Command  Name                    Here
 //   00       Null                    Nothing
@@ -75,7 +89,7 @@
 //   08       Pause                   Pauses where the drive is
 //   09       Seek                    Seeks and pauses
 //   0a, 0b   Scan forward, backward  Moves scan_frames a sector period
-//   0c       Open tray               Opens the tray for good, unconfirmed
+//   0c       Open tray               Opens the tray, which the caller closes, unconfirmed
 #include <functional>
 #include <map>
 
@@ -136,6 +150,10 @@ class DiscDrive final : public Drive
     static constexpr uint32_t first_track_start = 150;
     // 99:59:74, the last frame address a BCD time holds.
     static constexpr uint32_t last_frame_address = 99 * 4500 + 59 * 75 + 74;
+    // The disc a drive starts with, and a new one put in: one data track from 00:02:00 to the
+    // lead-out at 63:04:00, the latest Sega's disc format standard allows.
+    static constexpr Track data_track{first_track_start, 0x41};
+    static constexpr uint32_t latest_lead_out = 283'800;
     // What a frame address holds: a sector, none (the period passes without one), a sector the
     // decoder delivers with an error status, or a place the drive never finds: a seek there does
     // not arrive, and a read that reaches it loses its place, both seeking until another command.
@@ -168,7 +186,8 @@ class DiscDrive final : public Drive
         return true;
     }
     // The drive's power-on state: paused at the first frame address at double speed, its first
-    // link frame a sector period away. The disc stays.
+    // link frame a sector period away. The disc and the tray stay: an open tray reports open and
+    // a drive without a disc none.
     void reset(uint64_t now) override;
     uint64_t due() const override
     {
@@ -179,6 +198,16 @@ class DiscDrive final : public Drive
         return at;
     }
     void act(DrivePort &port) override;
+    bool tray_opened() const
+    {
+        return mode == Mode::Open;
+    }
+    // Opens or closes the tray. Opening stops the drive where it is. Closing starts it as at
+    // power-on, or reporting no disc without one. The link frames keep their times.
+    void set_tray(bool open);
+    // Puts the disc in or takes it out, through an open tray. Taking it out clears its tracks,
+    // sectors, subcode and sector states. The providers stay with the drive.
+    void set_disc(bool in);
     // A raw sector of 2352 bytes read at frame_address, in place of one with only a mode 1 header.
     void write_sector(uint32_t frame_address, std::vector<uint8_t> raw)
     {
@@ -228,6 +257,7 @@ class DiscDrive final : public Drive
         Scanning,
         Stopped,
         Open,
+        Empty,
         Ring
     };
     struct Span
@@ -240,10 +270,12 @@ class DiscDrive final : public Drive
     DiscDriveConfig config;
     std::map<uint32_t, std::vector<uint8_t>> sectors;
     std::map<uint32_t, Subcode> subcodes;
-    std::vector<Track> tracks{{first_track_start, 0x41}};
-    // 63:04:00, the latest lead-out Sega's disc format standard allows.
-    uint32_t lead_out = 283'800;
+    std::vector<Track> tracks{data_track};
+    uint32_t lead_out = latest_lead_out;
     std::vector<Span> spans;
+    // Whether a disc is in. The tray is open in Mode::Open, and closed without a disc in
+    // Mode::Empty.
+    bool present = true;
     RingProvider ring_provider;
     SectorProvider sector_provider;
     SubcodeProvider subcode_provider;
@@ -264,6 +296,9 @@ class DiscDrive final : public Drive
     {
         return config.sector_cycles / speed;
     }
+    // The state a closed tray starts in: paused at the first frame address at double speed, or
+    // without a disc reporting none.
+    void start();
     void tick(DrivePort &port, uint64_t now);
     std::array<uint8_t, link_frame_size> report();
     void obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_t now);
