@@ -24,6 +24,8 @@ known revision: strict, the clock skipping on at the profile's idle loop.
 - The drive's tray on CDB105: an opening gives the host status open with DCHG, a closing on another
   disc that disc's TOC through 02 and its sectors, 05 opens the tray through drive command 0c, and a
   closing on an empty tray gives the status no disc.
+- A pregap on CDB105: a read through 10 that runs from the data track into an audio track's pregap
+  gives the host the data track's sectors, and the firmware plays on from the audio track's index 1.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -37,7 +39,8 @@ import pathlib
 from cdblock import __main__ as cli
 from cdblock import binding, strict
 from cdblock import extension as extensions
-from cdblock.disc import DATA, DATA_TRACK, FIRST, LEAD_OUT, NO_DISC, OPEN, Disc, Drive, sector
+from cdblock.disc import (DATA, DATA_TRACK, FIRST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SUBCODE, Disc, Drive,
+                          sector)
 from cdblock.host import DCHG, DRDY, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
 
 from . import rw
@@ -81,6 +84,9 @@ PROVIDED_SECTORS, PROVIDED_SHIFT = 8, 256
 # track and the lead-out.
 CHANGED_TRACKS, CHANGED_LEAD_OUT = ((FIRST, DATA_TRACK), (30_000, AUDIO_TRACK)), 60_000
 TOC_ENTRIES, NO_TRACK = 102, 0xFFFFFFFF
+# The pregap case's read: from PREGAP_DATA sectors before the audio track's pregap to PREGAP_AUDIO
+# sectors into the track.
+PREGAP_DATA, PREGAP_AUDIO = 10, 40
 
 
 class ProviderStop(Exception):
@@ -496,7 +502,8 @@ def check_subcode_provider(suite, dumps):
         seen = {}
         left = provided(lambda frame_address, symbols: seen.update({frame_address: symbols}))
         check_packs(case, "subcode left alone", played(left), PROVIDED_SECTORS)
-        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == rw.sector(frame_address - first)
+        # The drive asks for the sector at each position it reports too, where this disc holds none.
+        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == disc.subcodes.get(frame_address, bytes(SUBCODE))
                                                       for frame_address, symbols in seen.items()),
                    "the provider saw other subcode than the disc's")
         case.info["frame_addresses"] = sorted(seen)
@@ -607,6 +614,52 @@ def check_tray(suite, dumps):
     bd.close()
 
 
+def check_pregap(suite, dumps):
+    """A read through 10 that runs from the data track into an audio track with a pregap. At the
+    pregap's index 0 the firmware plays on from the audio track's index 1 at single speed, and it
+    pauses the drive at the read's end. The host gets the data track's sectors up to the pregap."""
+    case = suite.case("cdb105 pregap")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    bd = board(image, flags=HARNESS_FLAGS)
+    strict.apply(bd, profile, None)
+    host = Host(bd, idle=profile.IDLE)
+    drive = Drive(host)
+    disc = Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK)))
+    first, count = AUDIO_START - PREGAP - PREGAP_DATA, PREGAP_DATA + PREGAP + PREGAP_AUDIO
+    written = b"".join(f"sector {first + k}".encode().ljust(DATA, b"\0") for k in range(PREGAP_DATA))
+    disc.write(first, written)
+    try:
+        disc.pregap(1)
+        case.check(False, "the first track took a pregap")
+    except ValueError as error:
+        case.check("track 2" in str(error), f"raised {error}")
+    disc.pregap(2)
+    try:
+        host.boot()
+        drive.insert(disc)
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+        mark = bd.log_count()
+        drive.read_sectors(0, first, count)
+        host.idle_until(lambda: bd.host_response()[0] >> 8 & 0x0F == PAUSE, "the pause after the read")
+        commands = [bytes.fromhex("".join(e.text.split()[:13])) for e in bd.log(binding.LOG_DRIVE_COMMAND, mark)]
+        case.equal([command[0] for command in commands], [0x06, 0x06, 0x08], "the drive commands of the read")
+        if len(commands) == 3:
+            play = commands[1]
+            case.equal([int.from_bytes(play[1:4], "big"), play[4], play[8], play[10]], [AUDIO_START, 1, 2, 1],
+                       "the frame address, index, track and speed of the play sent at the pregap")
+        case.equal(bd.host_response()[1:], [AUDIO_TRACK << 8 | 2, 0x0100 | (first + count) >> 16,
+                                            (first + count) & 0xFFFF], "the position after the read")
+        case.equal(host.command([0x5100, 0, 0, 0], name="51 get sector number")[3], PREGAP_DATA,
+                   "sectors in the partition")
+        data = b"".join(word.to_bytes(2, "big") for word in host.get(0, 0, PREGAP_DATA, PREGAP_DATA * DATA // 2))
+        case.check(data == written, "the data track's sectors did not arrive")
+        case.info["steps"] = [f"{s.name}: {s.instructions}" for s in host.steps]
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    bd.close()
+
+
 def cli_status(argv):
     output, errors = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -695,10 +748,12 @@ def run(context):
         check_subcode(suite, dumps)
         check_subcode_provider(suite, dumps)
         check_tray(suite, dumps)
+        check_pregap(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the providers, the subcode and the tray: need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray and the pregap: "
+                   "need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 61)
+        suite.pin("cases", len(suite.cases), 62)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:

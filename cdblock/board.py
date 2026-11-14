@@ -353,7 +353,8 @@ class Board:
 
     def drive_disc_subcode(self, frame_address, symbols):
         """The subcode of the sector at frame_address: its 96 symbols in disc order, R to W in the
-        low six bits of each."""
+        low six bits of each and the Q channel in bit 6. The drive's position reports carry a
+        sector's Q when its CRC holds, and one built from the tracks otherwise."""
         symbols = bytes(symbols)
         if len(symbols) != SUBCODE:
             raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
@@ -361,8 +362,9 @@ class Board:
         self._ok(self.lib.cdblock_drive_disc_subcode(self.handle, frame_address, data))
 
     def drive_disc_subcode_provider(self, provider):
-        """provider(frame_address, symbols) sees each sector's subcode as the drive starts its
-        block, a missing sector's too. symbols is the 96 bytes the disc holds there, zeros for a
+        """provider(frame_address, symbols) sees each sector's subcode as the drive reports a
+        position in it, a paused drive's too, or starts its block, a missing sector's too: once for
+        a sector it reports and then reads. symbols is the 96 bytes the disc holds there, zeros for a
         sector without any. It returns 96 bytes to send instead, or None to leave them. None for the
         disc's own subcode throughout. An exception, the board and the drive as for
         drive_disc_ring_provider."""
