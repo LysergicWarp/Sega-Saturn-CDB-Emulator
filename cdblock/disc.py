@@ -200,9 +200,9 @@ class Disc:
     def pregap(self, track, frames=PREGAP):
         """Track number track, the second or a later one, gets a pregap: the frames before its
         start hold a Q that names the track at index 0, with its control/ADR byte and a relative
-        time that counts down to the start. The drive reports that Q there, and the track at index
-        1 from its start. The Q takes bit 6 of those sectors' symbols and leaves subcode written
-        there its other bits. Before insert, as write."""
+        time that counts down to zero in the last of them. The drive reports that Q there, and the
+        track at index 1 from its start. The Q takes bit 6 of those sectors' symbols and leaves
+        subcode written there its other bits. Before insert, as write."""
         if not 2 <= track <= len(self.tracks):
             raise ValueError(f"a pregap goes before track 2 to {len(self.tracks)}, not {track}")
         if not 0 < frames < self.tracks[track - 1][0] - self.tracks[track - 2][0]:
@@ -216,7 +216,7 @@ class Disc:
         for track, frames in self.pregaps.items():
             start, control = self.tracks[track - 1]
             for frame_address in range(start - frames, start):
-                q = (bytes([control, _make.bcd(track), 0]) + _make.bcd_address(start - frame_address) + b"\0"
+                q = (bytes([control, _make.bcd(track), 0]) + _make.bcd_address(start - 1 - frame_address) + b"\0"
                      + _make.bcd_address(frame_address))
                 written = merged.get(frame_address, bytes(SUBCODE))
                 merged[frame_address] = bytes(symbol & 0xBF | bit for symbol, bit in zip(written, q_symbols(q)))

@@ -566,15 +566,18 @@ Reports:
   the sector's 96 subcode symbols, with a CRC. The drive reports it while it plays, scans or holds
   a position, whatever its ADR.
 - The disc's subcode so gives its pregaps and indexes: in a pregap the Q names the coming track at
-  index 0 with a time that counts down. CDB105 takes a play that reaches index 0 of a track of the
-  other kind up again from that track
+  index 0 with a time that counts down to zero in the pregap's last frame. CDB105 takes a play
+  that reaches index 0 of a track of the other kind up again from that track
   ([playing, scanning and pausing](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#playing-scanning-and-pausing)).
 - A sector without subcode, or whose Q fails its CRC, reports a Q built from the tracks: the track
   holding the position, its control byte, index 1 and the time in the track. Past the lead-out the
-  track is `aa`. Index 0 counts down only before the first track, so a disc without subcode has no
-  pregaps between its tracks.
+  track is `aa`. Index 0 counts down only before the first track, to zero in the frame before its
+  start, so a disc without subcode has no pregaps between its tracks.
 - Unconfirmed: what a real drive reports for a Q it cannot read, whether it reports a Q whose ADR
-  is not 1 as it reads it, and how far a report's Q lags the sector at the decoder input.
+  is not 1 as it reads it, which Q a paused drive reports (here the Q of the sector it holds, in
+  every link frame), what the Q holds past the lead-out, and which sector's Q a report carries
+  against the sector at the decoder input (here the report after a sector carries the next
+  sector's).
 - The ring seek answers as Yabause's drive emulation does: status `b6`, report word `44f1` and bytes
   `09 09 09 09`. A provider set with `cdblock_drive_disc_ring_provider` can answer each seek
   instead, given its target, or fail the board.
@@ -602,7 +605,7 @@ Subcode:
 - Each frame sets the symbol word (`0x0a000018`) and raises decoder flag 5. The first frame of a
   block raises flag 6 with it. IRQ7 follows the enables the firmware wrote.
 - `cdblock_drive_disc_subcode` gives a sector its 96 symbols in disc order, R to W in the low six
-  bits of each byte. A sector without any sends zeros.
+  bits of each byte and the Q channel in bit 6. A sector without any sends zeros.
 - Frames 0 to 95 carry the symbols, each byte whole. Frames 96 and 97, the sync frames, leave the
   last symbol in the word.
 - The stream runs on data reads as on audio, and for missing and unreadable sectors too. It stops
@@ -610,7 +613,9 @@ Subcode:
 - A subcode provider set with `cdblock_drive_disc_subcode_provider` serves the symbols from the
   caller, under the sector provider's rules. It is asked for each sector the drive reports a
   position in, a paused drive's too, and for each block the drive starts, once for a sector it
-  reports and then reads. It is asked for missing sectors too.
+  reports and then reads. A drive that holds a position asks once for it, and again after subcode
+  is written, a provider is set, the tray closes or the board is reset. It is asked for missing
+  sectors too.
 - Bit 6 of each symbol is the Q channel, which the drive reports over the link. The symbols go to
   the interface chip whole. The P channel is not used.
 - The fed drive sends no subcode. Its caller raises the flags and sets the symbol word.
@@ -852,7 +857,7 @@ has that name, as on Windows.
 - `package`: `python -m cdblock` on each revision with no card and with each card, sectors put and
   got, the lifecycle and module extensions as source, ELF, plain code and card ROM, the command
   line, the R-W subcode of an audio play through `20` (Get Subcode), the tray opened, closed on
-  another disc and closed on none, and a read that runs into an audio track's pregap.
+  another disc and closed on none, and reads that run into the pregap of a track of the other kind.
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 

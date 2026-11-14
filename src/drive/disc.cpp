@@ -127,6 +127,8 @@ void DiscDrive::start()
     toc_entry = 0;
     seeking = backward = false;
     seek_until = subcode_at = 0;
+    // The disc may be another one, or its provider serve another, since the sector was taken.
+    taken = false;
 }
 
 void DiscDrive::reset(uint64_t now)
@@ -165,7 +167,6 @@ void DiscDrive::set_disc(bool in)
     sectors.clear();
     subcodes.clear();
     spans.clear();
-    taken = false;
 }
 
 void DiscDrive::act(DrivePort &port)
@@ -241,8 +242,8 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
     // whatever its ADR. A real drive's report for a sector whose Q it cannot read is unconfirmed:
     // here, as for a sector without subcode, the drive builds one from the tracks. That Q has the
     // control/ADR byte, track and index of the track holding the position (BCD), the time in the
-    // track and the absolute time. Before the first track index 0 counts down to it, past the
-    // lead-out the track is aa, and there are no pregaps between tracks.
+    // track and the absolute time. Before the first track index 0 counts down to zero in the frame
+    // before it, past the lead-out the track is aa, and there are no pregaps between tracks.
     auto q = [&](uint8_t status) {
         b[report_status] = status;
         if (q_of(symbols_at(position), &b[report_control]))
@@ -259,7 +260,7 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
             b[report_control] = tracks.front().control;
             b[report_track] = 1;
             b[report_index] = 0;
-            msf(&b[report_relative], tracks.front().start - position);
+            msf(&b[report_relative], tracks.front().start - 1 - position);
         }
         else
         {

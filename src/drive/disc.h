@@ -57,8 +57,10 @@
 // subcode symbols, ten bytes and their CRC. A sector without subcode, or whose Q fails its CRC,
 // reports a Q built from the tracks, with no pregap but the first track's and no index above 1.
 // The TOC entries are always built from the tracks. Unconfirmed: what a real drive reports for a Q
-// it cannot read, whether it reports a Q whose ADR is not 1 as it reads it, and how far a report's
-// Q lags the sector at the decoder input.
+// it cannot read, whether it reports a Q whose ADR is not 1 as it reads it, which Q a paused drive
+// reports (here the Q of the sector it holds, in every link frame), what the Q holds past the
+// lead-out, and which sector's Q a report carries against the sector at the decoder input (here
+// the report after a sector carries the next sector's).
 //
 // The firmware acts on the status byte's code, bits 7..4, and for code 8 on the low nibble too: 80,
 // 81 and 83 pick drive states of their own, 80 the open tray's and 83 the missing disc's, and
@@ -144,10 +146,11 @@ using RingProvider = std::function<int(uint32_t frame_address, RingAnswer &answe
 // Called as the drive reads a sector, with its frame address and the 2352 raw bytes it would read
 // there to change. Nonzero fails the board.
 using SectorProvider = std::function<int(uint32_t frame_address, uint8_t *raw)>;
-// A sector's subcode: its 96 symbols in disc order, R to W in the low six bits of each.
+// A sector's subcode: its 96 symbols in disc order, R to W in the low six bits of each and the Q
+// channel in bit 6.
 using Subcode = std::array<uint8_t, 96>;
-// Called as the drive starts a sector's subcode block, with its frame address and the symbols the
-// disc holds there to change. Nonzero fails the board.
+// Called as the drive takes a sector's subcode, for a report's Q or a subcode block, with its
+// frame address and the symbols the disc holds there to change. Nonzero fails the board.
 using SubcodeProvider = std::function<int(uint32_t frame_address, uint8_t *symbols)>;
 
 class DiscDrive final : public Drive
@@ -294,7 +297,8 @@ class DiscDrive final : public Drive
     Subcode block{};
     uint64_t block_at = 0, block_period = 0, subcode_at = 0;
     unsigned block_frame = 0;
-    // The subcode the drive took last, for a report's Q or a block, and its frame address.
+    // The subcode the drive took last, for a report's Q or a block, and its frame address. The
+    // drive takes it anew after subcode is written, a provider is set or the drive starts.
     Subcode taken_symbols{};
     uint32_t taken_address = 0;
     bool taken = false;
