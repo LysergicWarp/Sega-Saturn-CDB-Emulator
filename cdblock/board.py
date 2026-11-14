@@ -32,17 +32,21 @@ class Board:
         if not self.handle:
             raise EmulatorError(self.lib.cdblock_last_error(None).decode())
         self._no_providers()
+        self._audio = self._audio_callback = None
 
     def clone(self):
         """A new board in this one's state: CPU, memory, devices, drive, checks, stops, watches,
-        coverage and log. A trace stays with this board. The drive's providers answer the copy too,
-        an exception from one raised by the copy."""
+        coverage and log. A trace stays with this board. The drive's providers and the audio sink
+        answer the copy too, an exception from one raised by the copy."""
         handle = self.lib.cdblock_clone(self.handle)
         if not handle:
             raise EmulatorError(self.lib.cdblock_last_error(None).decode())
         copy = Board.__new__(Board)
         copy.lib, copy.handle = self.lib, handle
         copy._no_providers()
+        copy._audio = copy._audio_callback = None
+        if self._audio is not None:
+            copy.set_audio_sink(self._audio)
         if self._rings is not None:
             copy.drive_disc_ring_provider(self._rings)
         if self._sectors is not None:
@@ -332,8 +336,9 @@ class Board:
 
     def drive_disc_sector_provider(self, provider):
         """provider(frame_address, raw) sees each sector as the drive reads it, past the lead-out
-        too. raw is the 2352 bytes it would read there, the sector written there or the sync pattern
-        and a mode 1 header. It returns 2352 bytes to read instead, or None to leave them. The bytes
+        too. raw is the 2352 bytes it would read there: the sector written there, the sync pattern
+        and a mode 1 header, or silence for an audio sector. It returns 2352 bytes to read instead,
+        or None to leave them. The bytes
         from the header on reach the decoder input, and missing sectors ask nothing. None for the
         disc's own sectors throughout. An exception, the board and the drive as for
         drive_disc_ring_provider."""
@@ -402,16 +407,32 @@ class Board:
         state = self._ok(self.lib.cdblock_drive_disc_state(self.handle))
         return bool(state & b.DISC_TRAY_OPEN), bool(state & b.DISC_PRESENT)
 
+    def set_audio_sink(self, sink):
+        """sink(frame_address, raw, speed) takes each audio sector the disc drive plays, a sector
+        period at the drive's speed apart: its 2352 bytes, 588 stereo pairs of 16-bit little-endian
+        samples, left first, and the speed, 1 single or 2 double. None for no sink. An exception it
+        raises fails the board, and the call that ran the drive raises it again. It runs inside that
+        call, may read the board and must not change it. The sink is the board's: it stays through
+        a reset and with another drive."""
+        callback = b.AudioSink()
+        if sink is not None:
+            def take(frame_address, raw, speed):
+                sink(frame_address, ctypes.string_at(raw, RAW_SECTOR), speed)
+            callback = b.AudioSink(self._provider_callback(take))
+        self._ok(self.lib.cdblock_set_audio_sink(self.handle, callback, None))
+        # The library holds the callback, so it stays referenced here.
+        self._audio, self._audio_callback = sink, callback
+
     def _provider_callback(self, answer):
-        """answer(frame_address, out) as the library calls a provider. An exception from it fails
-        the board."""
+        """answer(frame_address, out) as the library calls a provider, or with the speed after
+        them as it calls the audio sink. An exception from it fails the board."""
         # Weak, so the board and its callback make no cycle. The call running the drive holds the
         # board.
         board = weakref.ref(self)
 
-        def callback(_, frame_address, out):
+        def callback(_, *given):
             try:
-                answer(frame_address, out)
+                answer(*given)
                 return 0
             except BaseException as error:
                 # Kept and raised once the run returns, Ctrl-C included: ctypes would drop it.

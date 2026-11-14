@@ -703,6 +703,17 @@ void Board::subcode(uint8_t symbol, bool block_start)
                                     : Interface::SUBCODE_SYNC);
 }
 
+void Board::audio(uint32_t frame_address, const uint8_t *raw, unsigned speed)
+{
+    // The interface sends the sector on to the main board as it comes, whatever its registers hold,
+    // unconfirmed: whether one of them gates or mutes the audio output is not known.
+    log(LogKind::DriveAudio, frame_address, speed);
+    if (audio_sink)
+        if (const int stop = audio_sink(frame_address, raw, speed))
+            throw std::runtime_error("the audio sink stopped the run with status " + std::to_string(stop) +
+                                     " at frame address " + std::to_string(frame_address));
+}
+
 void Board::note(Note kind, uint32_t address, uint32_t value, std::string text)
 {
     const LogKind entry = kind == Note::Command  ? LogKind::DriveCommand

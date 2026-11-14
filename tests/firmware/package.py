@@ -39,6 +39,8 @@ known revision: strict, the clock skipping on at the profile's idle loop.
   that track's start at double speed, and the host gets the data track's sectors. The disc's
   pregaps: the Q they hold, a long one before a data track, one merged with written subcode and
   the lengths and tracks refused.
+- CD audio on CDB105: an audio play through 10 gives the audio sink the track's sectors as the disc
+  holds them, each at the decoder input too, and DEMP follows the track's pre-emphasis bit.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -52,8 +54,8 @@ import pathlib
 from cdblock import __main__ as cli
 from cdblock import binding, strict
 from cdblock import extension as extensions
-from cdblock.disc import (DATA, DATA_TRACK, FIRST, LAST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SUBCODE, Disc,
-                          Drive, q_symbols, sector)
+from cdblock.disc import (DATA, DATA_TRACK, FIRST, LAST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SECTOR, SUBCODE,
+                          Disc, Drive, q_symbols, sector)
 from cdblock.host import DCHG, DRDY, ESEL, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
 
 from . import rw
@@ -102,6 +104,13 @@ TOC_ENTRIES, NO_TRACK = 102, 0xFFFFFFFF
 # PREGAP_AFTER sectors into the track.
 LATER_DATA_START = 21_000
 PREGAP_BEFORE, PREGAP_AFTER = 10, 40
+# The audio case's disc: a data track, then an audio track with pre-emphasis whose sectors hold
+# generated samples from AUDIO_MARGIN sectors before the frames played to as many after them. The
+# firmware pauses the drive once a report shows the play's end, so the drive plays PLAY_OVERSHOOT
+# sectors past it, pinned as the run has it on the drive's default settings.
+PRE_EMPHASIS_TRACK, AUDIO_MARGIN, PLAY_OVERSHOOT = 0x11, 16, 1
+# PB6, the de-emphasis output DEMP: bit 6 of port B's low byte.
+PORT_B, DEMP = 0x05FFFFC3, 0x40
 
 
 class ProviderStop(Exception):
@@ -425,11 +434,11 @@ def idle_for(host, cycles, what, flags=0):
     host.idle_until(lambda: bd.cycles >= until or bd.host_flags() & flags, what)
 
 
-def play_subcode(host, sectors):
-    """An audio play of sectors from PLAY_FRAME_ADDRESS, the host asking for the packs with 20 once
-    a sector period. Returns the packs it got by two periods after the play, when the drive has
-    paused. A play that does not end raises RunError as the host's waits do."""
-    bd, packs = host.board, []
+def audio_play(host, sectors, each):
+    """An audio play of sectors from PLAY_FRAME_ADDRESS through 10, each() called once a sector
+    period until it ends. Returns two periods after the play, when the drive has paused. A play
+    that does not end raises RunError as the host's waits do."""
+    bd = host.board
     bd.host_clear_flags(0xFFFF & ~PEND)
     answer = host.command([0x1080 | PLAY_FRAME_ADDRESS >> 16, PLAY_FRAME_ADDRESS & 0xFFFF,
                            0x0080 | sectors >> 16, sectors & 0xFFFF], name="10 play")
@@ -439,9 +448,16 @@ def play_subcode(host, sectors):
     while not bd.host_flags() & PEND:
         if bd.cycles - start > WAIT_CYCLES:
             raise RunError(f"audio play: {WAIT_CYCLES:,} cycles passed")
-        read_packs(host, packs)
+        each()
         idle_for(host, SECTOR_CYCLES, "audio play", PEND)
     idle_for(host, 2 * SECTOR_CYCLES, "after the play")
+
+
+def play_subcode(host, sectors):
+    """An audio play of sectors from PLAY_FRAME_ADDRESS, the host asking for the packs with 20 once
+    a sector period. Returns the packs it got by two periods after the play."""
+    packs = []
+    audio_play(host, sectors, lambda: read_packs(host, packs))
     read_packs(host, packs)
     return packs
 
@@ -881,6 +897,96 @@ def check_pregap(suite, dumps):
     bd.close()
 
 
+def samples(frame_address):
+    """An audio sector of the audio case's disc: bytes that differ from one sector to the next."""
+    return bytes((frame_address * 31 + k * 7) & 0xFF for k in range(SECTOR))
+
+
+def check_audio(suite, dumps):
+    """An audio play through 10 of a track with pre-emphasis. The firmware starts no sector delivery
+    for it. The sink gets each sector from the play's frame address on once and in order, as the
+    disc holds it, until the drive obeys the pause. Each reaches the decoder input too, after the
+    sectors the play landed on, where DMA channel 0 takes none, and DEMP is high while the track
+    plays. The sink reads the clock as it is called: the calls come a sector period apart at single
+    speed. Then on copies of the board: a copy calls the sink too, a board without a sink still
+    logs the sectors, and a sink that raises fails the copy it was set on."""
+    case = suite.case("cdb105 audio")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    bd = board(image, flags=HARNESS_FLAGS)
+    strict.apply(bd, profile, None)
+    host = Host(bd, idle=profile.IDLE)
+    disc = Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, PRE_EMPHASIS_TRACK)))
+    first = PLAY_FRAME_ADDRESS - AUDIO_MARGIN
+    disc.write_audio(first, b"".join(samples(first + k) for k in range(PLAY_SECTORS + 2 * AUDIO_MARGIN)))
+    played, levels, boards = [], set(), [bd]
+
+    def sink(frame_address, raw, speed):
+        played.append((frame_address, raw, speed, bd.cycles))
+
+    def stop(frame_address, raw, speed):
+        raise ProviderStop(frame_address)
+
+    def level():
+        if played:
+            levels.add(bd.peek8(PORT_B) & DEMP)
+
+    bd.set_audio_sink(sink)
+    try:
+        host.boot()
+        Drive(host).insert(disc)
+        case.equal(bd.peek8(PORT_B) & DEMP, 0, "DEMP before the play")
+        mark = bd.log_count()
+        audio_play(host, PLAY_SECTORS, level)
+        expected = list(range(PLAY_FRAME_ADDRESS, PLAY_FRAME_ADDRESS + PLAY_SECTORS + PLAY_OVERSHOOT))
+        case.equal([entry[0] for entry in played], expected, "the sectors played")
+        case.check(all(raw == samples(frame_address) for frame_address, raw, _, _ in played),
+                   "a sector's samples differ from the disc's")
+        case.equal({entry[2] for entry in played}, {1}, "the speed the sink was given")
+        case.equal({after[3] - before[3] for before, after in zip(played, played[1:])}, {SECTOR_CYCLES},
+                   "cycles between the sink's calls")
+        case.equal(len(bd.log(binding.LOG_DRIVE_AUDIO, mark)), len(played), "audio entries in the log")
+        sectors = bd.log(binding.LOG_DRIVE_SECTOR, mark)
+        at_decoder = [entry.address for entry in sectors]
+        case.equal(at_decoder[-len(played):], expected, "the sectors at the decoder input")
+        case.equal(sum(entry.value for entry in sectors), 0, "words DMA channel 0 took of them")
+        case.check(len(at_decoder) > len(played) and at_decoder[-len(played) - 1] == PLAY_FRAME_ADDRESS - 1,
+                   f"no landing sector at the decoder input before the play: {at_decoder[:8]}")
+        case.equal(sorted(levels), [DEMP], "DEMP while the track plays")
+        case.equal(bd.peek8(PORT_B) & DEMP, 0, "DEMP after the play")
+        case.info["played"] = len(played)
+
+        def again(copy):
+            """The same play on copy. Returns the audio entries its log gained."""
+            boards.append(copy)
+            entries = copy.log_count()
+            audio_play(Host(copy, idle=profile.IDLE), PLAY_SECTORS, lambda: None)
+            return len(copy.log(binding.LOG_DRIVE_AUDIO, entries))
+
+        # A copy calls the sink too, which the board it was copied from still holds.
+        count = len(played)
+        case.equal(again(bd.clone()), count, "audio entries in a copy's log")
+        case.equal([entry[0] for entry in played[count:]], expected, "the sectors a copy played")
+        # Without a sink the sectors are logged all the same.
+        silent = bd.clone()
+        silent.set_audio_sink(None)
+        case.equal(again(silent), count, "audio entries in the log without a sink")
+        case.equal(len(played), 2 * count, "calls of a sink that was dropped")
+        # The copy's own run raises the sink's exception, at the first sector played.
+        stopped = bd.clone()
+        stopped.set_audio_sink(stop)
+        try:
+            again(stopped)
+            case.check(False, "the play with a raising sink ended")
+        except ProviderStop as error:
+            case.equal(error.args, (PLAY_FRAME_ADDRESS,), "the sector the sink raised at")
+            case.check("audio sink stopped the run" in stopped.error(), f"the board's error: {stopped.error()}")
+    except (RunError, EmulatorError, ProviderStop) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    for each in boards:
+        each.close()
+
+
 def cli_status(argv):
     output, errors = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -971,11 +1077,12 @@ def run(context):
         check_tray(suite, dumps)
         check_tray_requests(suite, dumps)
         check_pregap(suite, dumps)
+        check_audio(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray and the pregap: "
-                   "need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray, the pregap and the "
+                   "audio: need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 63)
+        suite.pin("cases", len(suite.cases), 64)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:

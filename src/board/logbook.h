@@ -30,6 +30,7 @@ enum class LogKind : uint32_t
     DriveSector,   // a sector the drive handed to the decoder input
     SerialSent,    // a byte SCI1 took from TDR1 to send
     SerialLost,    // a byte from the serial line's far end that RDR1 did not take
+    DriveAudio,    // an audio sector the drive played
 };
 
 struct LogEntry

@@ -9,7 +9,7 @@
  * instead: on failure CDBLOCK_EXIT_ERROR, which is 0, with the reason in the same place.
  *
  * An error the board cannot go on from (a failed check, an unknown drive command, or a nonzero
- * return from a ring or sector provider) fails the board, which then needs a reset. Until then
+ * return from a provider or the audio sink) fails the board, which then needs a reset. Until then
  * runs, clock advances, bus accesses and device events (host, decoder, drive, card, timer, TEST
  * pad and serial line) fail. Peeks, pokes, queries such as the CPU state, the host flags, the FIFO,
  * the clock or the log, cdblock_card_memory, the board's setup and the disc drive's tray and disc
@@ -109,6 +109,8 @@ typedef struct cdblock_cpu
 #define CDBLOCK_LOG_SERIAL_SENT 16
 /* A byte from the serial line's far end that RDR1 did not take: value, text says why. */
 #define CDBLOCK_LOG_SERIAL_LOST 17
+/* An audio sector the disc drive played: frame address in address, the drive's speed in value. */
+#define CDBLOCK_LOG_DRIVE_AUDIO 18
 
 typedef struct cdblock_log_entry
 {
@@ -332,7 +334,8 @@ CDBLOCK_EXPORT int cdblock_drive_disc_ring_provider(cdblock_board *board, cdbloc
 /* The sectors the drive reads, from the caller, NULL for the disc's own.
  * - As the drive reads each sector it hands over, past the lead-out too, provider is called with
  *   user, the frame address and raw, which it may change. raw holds the 2352 bytes the drive would
- *   read there: the sector written there, or the sync pattern and a mode 1 header.
+ *   read there: the sector written there, or the sync pattern and a mode 1 header, or silence, all
+ *   zeros, for an audio sector.
  * - The bytes from the header on reach the decoder input. Missing sectors ask nothing.
  * - A nonzero return fails the board, with an error naming that status.
  * - As the ring provider does, it runs inside the call that ran the drive, must not change the
@@ -361,10 +364,11 @@ CDBLOCK_EXPORT int cdblock_drive_disc_sector_provider(cdblock_board *board, cdbl
  * - A subcode provider, NULL for the disc's own, is called with user, the frame address and the 96
  *   symbols the disc holds there, which it may change: for each sector the drive reports a position
  *   in, a paused drive's too, and for each block it starts, once for a sector it reports and then
- *   reads. A drive that holds a position asks once for it, and again after subcode is written, a
- *   provider is set, the tray closes or the board is reset. It follows the sector provider's
- *   rules: a nonzero return fails the board, at a report as at a block, it runs inside the call
- *   that ran the drive, must not change the board, and goes with the drive.
+ *   reads. The Q it leaves there also says whether the drive plays the sector as audio. A drive
+ *   that holds a position asks once for it, and again after subcode is written, a provider is set,
+ *   the tray closes or the board is reset. It follows the sector provider's rules: a nonzero return
+ *   fails the board, at a report as at a block, it runs inside the call that ran the drive, must
+ *   not change the board, and goes with the drive.
  * - The fed drive sends no subcode: its caller raises the flags and sets the symbol word, with
  *   cdblock_decoder_flags and cdblock_decoder_subcode.
  * - Unconfirmed: whether a real drive streams while paused, seeking or scanning, whether the
@@ -417,6 +421,41 @@ CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdb
 CDBLOCK_EXPORT int cdblock_drive_disc_tray(cdblock_board *board, int open);
 CDBLOCK_EXPORT int cdblock_drive_disc_present(cdblock_board *board, int present);
 CDBLOCK_EXPORT int cdblock_drive_disc_state(cdblock_board *board);
+
+/* CD audio, the interface chip's digital audio output to the main board.
+ * - sink, NULL for none, is called once for each audio sector the disc drive plays, with user, the
+ *   frame address, the sector's 2352 bytes and the drive's speed, 1 single or 2 double. The bytes
+ *   are 588 stereo pairs of 16-bit little-endian samples, left first: the sector written there or
+ *   the sector provider's, and silence for a sector with neither. An unreadable sector's bytes come
+ *   as they are.
+ * - The calls come a sector period apart at that speed: a read at double speed that runs into
+ *   audio plays it at twice the rate.
+ * - A sector is audio when the Q it holds has the data bit clear in its control byte, or without a
+ *   Q the drive can read when its track's control byte has. Only a sector from the first track's
+ *   start to the lead-out is, whatever its Q. A pregap follows its Q, so the part of a long one
+ *   that holds the audio track's control byte is audio.
+ * - The drive plays the audio sectors it reads from the read's frame address on: not the sectors a
+ *   read lands on before it, nor a missing sector, and nothing while it is paused, stopped,
+ *   seeking, scanning or reading the TOC. Each sector played is logged as CDBLOCK_LOG_DRIVE_AUDIO,
+ *   with a sink or without, 75 entries a second at single speed.
+ * - An audio sector reaches the decoder input too, as any sector does, and its subcode block is
+ *   sent. The CDB105 firmware starts no sector delivery for an audio play, so those samples do not
+ *   pass through the SH-1.
+ * - A nonzero return fails the board, with an error naming that status. The sink runs inside the
+ *   call that ran the drive. It may read the board with cdblock_peek and cdblock_clock_cycles and
+ *   must not change it.
+ * - The sink is the board's: it stays through the board's reset and when another drive is
+ *   selected, a clone calls it with the same user, and a failed board takes another.
+ * - The board keeps no samples and applies no de-emphasis. PB6 (bit 6 of 0x05ffffc3) is DEMP, which
+ *   the firmware sets from the pre-emphasis bit of the track that plays.
+ * - The fed drive has no audio.
+ * - Unconfirmed: whether an interface chip register gates or mutes the output (here none does),
+ *   whether an audio sector reaches the decoder input, whether a real drive is silent while it
+ *   scans, and where a real drive starts and ends its audio around a play: here from the play's
+ *   frame address until the drive obeys the next command, so the sectors between the firmware's
+ *   end of a play and its pause are played too. */
+typedef int (*cdblock_audio_sink)(void *user, uint32_t frame_address, const uint8_t *raw, int speed);
+CDBLOCK_EXPORT int cdblock_set_audio_sink(cdblock_board *board, cdblock_audio_sink sink, void *user);
 
 /* MPEG card.
  * - cdblock_card_request pulses a data request count times, TIOCA1 for video or TIOCA0 for audio,

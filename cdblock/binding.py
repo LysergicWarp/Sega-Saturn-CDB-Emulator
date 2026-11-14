@@ -16,7 +16,8 @@ DISC_TRAY_OPEN, DISC_PRESENT = 1, 2
 CARD_VIDEO, CARD_AUDIO = 0, 1
 (LOG_HOST_FLAGS, LOG_PORT_WRITE, LOG_LINK_SENT, LOG_LINK_MISSED, LOG_CARD_VIDEO, LOG_CARD_AUDIO,
  LOG_CARD_WRITE, LOG_INTERRUPT, LOG_EXCEPTION, LOG_VIOLATION, LOG_READ, LOG_WRITE,
- LOG_DRIVE_COMMAND, LOG_DRIVE_REPORT, LOG_DRIVE_SECTOR, LOG_SERIAL_SENT, LOG_SERIAL_LOST) = range(1, 18)
+ LOG_DRIVE_COMMAND, LOG_DRIVE_REPORT, LOG_DRIVE_SECTOR, LOG_SERIAL_SENT, LOG_SERIAL_LOST,
+ LOG_DRIVE_AUDIO) = range(1, 19)
 
 u8, u16, u32, u64 = ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint32, ctypes.c_uint64
 size_t, c_int, c_long, c_char_p = ctypes.c_size_t, ctypes.c_int, ctypes.c_long, ctypes.c_char_p
@@ -56,6 +57,8 @@ RingProvider = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINT
 SectorProvider = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINTER(u8))
 # int provider(void *user, uint32_t frame_address, uint8_t symbols[96])
 SubcodeProvider = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINTER(u8))
+# int sink(void *user, uint32_t frame_address, const uint8_t *raw, int speed)
+AudioSink = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, u32, ctypes.POINTER(u8), ctypes.c_int)
 
 
 class LogEntry(ctypes.Structure):
@@ -124,6 +127,7 @@ FUNCTIONS = [
     ("cdblock_drive_disc_tray", c_int, [Board, c_int]),
     ("cdblock_drive_disc_present", c_int, [Board, c_int]),
     ("cdblock_drive_disc_state", c_int, [Board]),
+    ("cdblock_set_audio_sink", c_int, [Board, AudioSink, ctypes.c_void_p]),
     ("cdblock_card_request", c_int, [Board, c_int, ctypes.c_uint]),
     ("cdblock_card_interrupt", c_int, [Board, c_int]),
     ("cdblock_card_push_status", c_int, [Board, u16]),

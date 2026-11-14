@@ -197,6 +197,17 @@ class Disc:
                                                      data[k * DATA:(k + 1) * DATA])
         return count
 
+    def write_audio(self, frame_address, samples):
+        """Audio in sectors from frame_address on, 2352 bytes each as the drive plays them: stereo
+        pairs of 16-bit little-endian samples, left first, the last sector padded with silence.
+        Returns the sectors written, at least one. Before the disc goes in, as write."""
+        samples = bytes(samples)
+        count = max(1, -(-len(samples) // SECTOR))
+        _on_disc(frame_address, count)
+        for k in range(count):
+            self.sectors[frame_address + k] = samples[k * SECTOR:(k + 1) * SECTOR].ljust(SECTOR, b"\0")
+        return count
+
     def write_subcode(self, frame_address, symbols):
         """The subcode of the sector at frame_address: its 96 symbols in disc order, R to W in the
         low six bits of each and the Q channel in bit 6. The drive sends each symbol whole, and its
