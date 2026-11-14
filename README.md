@@ -33,7 +33,7 @@ ROM dump the caller supplies.
   eight MPEG cards run on dumps you supply.
 
 It is not cycle accurate: there is no instruction or bus timing, and the disc drive's timing is a
-guess. MPEG decoding, CD audio and disc images are not modeled
+guess. MPEG decoding and disc images are not modeled
 ([what it does not model](#what-it-does-not-model)).
 
 By default the board has no clock. Devices act only when the caller raises their events, and the
@@ -299,7 +299,7 @@ a separate unit on the serial link. Three implementations come with the library:
 - Without device timing or the clock nothing happens unless the caller raises it.
 - ITU external clocks, phase counting, synchronous operation and complementary or
   reset-synchronized PWM.
-- The optical drive's own electronics, disc images, CD audio, MPEG decoding, the A/D converter, the
+- The optical drive's own electronics, disc images, MPEG decoding, the A/D converter, the
   timer pulse output and the watchdog's counting.
 - SCI0 in asynchronous mode, with an external clock, and receiving without transmitting. A transfer
   ends whole, so TDR's next byte and TEND come at its end, not as bit 7 goes out.
@@ -587,14 +587,15 @@ Sectors:
 - While reading, each sector period hands the sector at the position to the decoder input with
   decoder status 0. The drive raises its header flag and moves it on DMA channel 0, then reports in
   the next link frame.
-- A sector the caller did not write with `cdblock_drive_disc_sector` has only a mode 1 header.
-  Audio sectors are delivered as data sectors are.
+- A sector the caller did not write with `cdblock_drive_disc_sector` has only a mode 1 header, and
+  an audio one is silence. Audio sectors reach the decoder input as data sectors do.
 - `cdblock_drive_disc_sector_state` makes sectors missing, unreadable or unreachable. A missing
   sector reads as nothing, and an unreadable one comes with a decoder status the caller gives. At
   an unreachable one a seek never arrives and a read loses its place, both reporting seeking.
 - A sector provider set with `cdblock_drive_disc_sector_provider` serves the disc's sectors from
   the caller, past the lead-out too, as a Saturn emulator serves its disc image. It gets the 2352
-  bytes the drive would read, the written sector or the sync pattern and a mode 1 header, and may
+  bytes the drive would read, the written sector, the sync pattern and a mode 1 header or an audio
+  sector's silence, and may
   change them or fail the board. Missing sectors ask nothing.
 
 Subcode:
@@ -615,7 +616,7 @@ Subcode:
   position in, a paused drive's too, and for each block the drive starts, once for a sector it
   reports and then reads. A drive that holds a position asks once for it, and again after subcode
   is written, a provider is set, the tray closes or the board is reset. It is asked for missing
-  sectors too.
+  sectors too. The Q it gives also says whether the drive plays the sector as audio.
 - Bit 6 of each symbol is the Q channel, which the drive reports over the link. The symbols go to
   the interface chip whole. The P channel is not used.
 - The fed drive sends no subcode. Its caller raises the flags and sets the symbol word.
@@ -623,6 +624,42 @@ Subcode:
   interface chip sets flag 5 while its enable is clear, where a block's first frame falls against
   the sector's header flag (here at the same time), what the sync frames carry, and what the symbol
   word holds above the symbol.
+
+CD audio:
+
+- `cdblock_set_audio_sink` gives the board a sink for the interface chip's digital audio output to
+  the main board. It is called once for each audio sector the disc drive plays, with the frame
+  address, the sector's 2352 bytes and the drive's speed, 1 single or 2 double. The bytes are 588
+  stereo pairs of 16-bit little-endian samples, left first.
+- The calls come a sector period apart at that speed. A read at double speed that runs into audio
+  plays it at twice the rate.
+- A sector is audio when its Q has the data bit clear in the control byte. A sector without a Q the
+  drive can read follows its track's control byte. The subcode provider's Q counts as the disc's.
+- Only sectors from the first track's start to the lead-out are audio, whatever their Q, so disc
+  authentication's ring stays data.
+- A pregap follows its Q. In a long pregap before a data track, the part whose Q holds the audio
+  track's control byte is audio.
+- The bytes are the written sector's or the sector provider's, and silence for a sector with
+  neither. An unreadable sector's bytes come as they are.
+- The sectors a play lands on before its frame address are muted. A paused, stopped, seeking or
+  scanning drive plays nothing, nor one that reads the TOC, and a missing sector gives no call.
+- The play goes on until the drive obeys the next command. On the default settings the drive plays
+  one sector past the end of a play that the CDB105 firmware ends with its pause.
+- An audio sector reaches the decoder input as well. The CDB105 firmware starts no sector delivery
+  for an audio play, so DMA channel 0 takes none of it and the samples do not pass through the SH-1.
+- Each sector played is logged with the speed, with a sink or without: 75 entries a second at
+  single speed, which `cdblock_log_kinds` leaves out for a host that does not read them.
+- A nonzero return from the sink fails the board. The sink runs inside the call that ran the
+  drive. It may read the board with `cdblock_peek` and `cdblock_clock_cycles` and must not change
+  it.
+- The sink is the board's. It stays through a reset and when another drive is selected, a clone
+  calls it too, and a failed board takes another.
+- The board keeps no samples and applies no de-emphasis. PB6 is DEMP, which the firmware sets from
+  the pre-emphasis bit of the track that plays.
+- The fed drive has no audio.
+- Unconfirmed: whether an interface chip register gates or mutes the output (none does here),
+  whether an audio sector reaches the decoder input, whether a real drive is silent while it scans,
+  and where a real drive starts and ends its audio around a play.
 
 The tray and the disc:
 
@@ -687,7 +724,8 @@ The reports follow what the firmware accepts. The timing defaults count the SH-1
 are guesses: 4000 cycles between strobes, above the 3389 that a byte's 3200 and the SH-1's answer
 189 instructions after the strobe need, 1/15 s to seek, 15 frames a period while scanning, and a
 read landing 4 frames early. A real drive's timing and answers
-are not confirmed. The log holds each command but 00, Null, and each report and sector. A link frame
+are not confirmed. The log holds each command but 00, Null, and each report, sector and audio
+sector. A link frame
 the SH-1 did not answer in full carries no command, and the link logs the strobes it missed.
 
 Not modeled: the drive's final byte asking for a repeat, which is always `00`, statuses `81` and
@@ -875,7 +913,8 @@ has that name, as on Windows.
   `make.py`'s sectors, and `payload.py`'s card ROM and back, through their command lines.
 - `package`: `python -m cdblock` on each revision with no card and with each card, sectors put and
   got, the lifecycle and module extensions as source, ELF, plain code and card ROM, the command
-  line, the R-W subcode of an audio play through `20` (Get Subcode), the tray opened, closed on
+  line, the R-W subcode of an audio play through `20` (Get Subcode), an audio play's sectors at the
+  audio sink, the tray opened, closed on
   another disc and closed on none, a disc changed in one go, a board booted without a disc or with
   its tray open, the host's requests in those states, and reads that run into the pregap of a track
   of the other kind.
