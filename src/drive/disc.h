@@ -53,6 +53,13 @@
 // The times are BCD. A TOC entry is a Q report in the lead-in, with the entry's start in the absolute
 // time, or for points A0 and A1 the track number in byte 8.
 //
+// A position report carries the Q the disc holds at the position: bit 6 of each of the sector's 96
+// subcode symbols, ten bytes and their CRC. A sector without subcode, or whose Q fails its CRC,
+// reports a Q built from the tracks, with no pregap but the first track's and no index above 1.
+// The TOC entries are always built from the tracks. Unconfirmed: what a real drive reports for a Q
+// it cannot read, whether it reports a Q whose ADR is not 1 as it reads it, and how far a report's
+// Q lags the sector at the decoder input.
+//
 // The firmware acts on the status byte's code, bits 7..4, and for code 8 on the low nibble too: 80,
 // 81 and 83 pick drive states of their own, 80 the open tray's and 83 the missing disc's, and
 // 88..8f an error. This drive never sends 81 or 82: what they mean to a drive is unknown. Bit 2
@@ -217,6 +224,7 @@ class DiscDrive final : public Drive
     void write_subcode(uint32_t frame_address, const Subcode &symbols)
     {
         subcodes[frame_address] = symbols;
+        taken = false;
     }
     // The disc's tracks and lead-out, which invalid() accepts.
     void set_tracks(std::vector<Track> list, uint32_t end)
@@ -244,6 +252,7 @@ class DiscDrive final : public Drive
     void set_subcode_provider(SubcodeProvider provider)
     {
         subcode_provider = std::move(provider);
+        taken = false;
     }
 
   private:
@@ -285,6 +294,10 @@ class DiscDrive final : public Drive
     Subcode block{};
     uint64_t block_at = 0, block_period = 0, subcode_at = 0;
     unsigned block_frame = 0;
+    // The subcode the drive took last, for a report's Q or a block, and its frame address.
+    Subcode taken_symbols{};
+    uint32_t taken_address = 0;
+    bool taken = false;
     // The mode, and the one a seek, read or ring seek takes on arriving.
     Mode mode = Mode::Paused, arrival = Mode::Paused;
     uint32_t position = first_track_start, target = first_track_start;
@@ -308,6 +321,8 @@ class DiscDrive final : public Drive
     uint32_t landing() const;
     void halt(Mode next);
     void deliver(DrivePort &port, uint32_t frame_address);
+    // The subcode of the sector at frame_address: the disc's, or zeros, as the provider leaves it.
+    const Subcode &symbols_at(uint32_t frame_address);
     // Starts the subcode block of the sector at frame_address, its first frame now.
     void stream(DrivePort &port, uint32_t frame_address, uint64_t now);
     // The block's frames that are due.

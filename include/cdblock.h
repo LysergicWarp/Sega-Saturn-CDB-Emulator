@@ -344,21 +344,31 @@ CDBLOCK_EXPORT int cdblock_drive_disc_sector_provider(cdblock_board *board, cdbl
  * raises decoder flag 5, the first of a block flag 6 with it, so IRQ7 follows the enables the
  * firmware wrote.
  * - cdblock_drive_disc_subcode gives the sector at frame_address its 96 symbols in disc order, R to
- *   W in the low six bits of each. A sector without any has zeros. They stay as the sectors do.
+ *   W in the low six bits of each and the Q channel in bit 6. A sector without any has zeros. They
+ *   stay as the sectors do.
  * - Frames 0 to 95 carry the symbols, each byte whole in the symbol word. Frames 96 and 97, the
  *   sync frames, leave the last symbol there.
  * - The stream runs for a missing or unreadable sector too, and for data as for audio. It stops as
  *   the drive leaves the read, and a pause ends the block being sent.
- * - A subcode provider, NULL for the disc's own, is called as the drive starts each block with
- *   user, the frame address and the 96 symbols the disc holds there, which it may change. It
- *   follows the sector provider's rules: a nonzero return fails the board, it runs inside the call
- *   that ran the drive, must not change the board, and goes with the drive.
+ * - The Q is 96 bits, the most significant first: ten bytes and their CRC, inverted. A position
+ *   report carries the ten bytes of the sector at the drive's position after its status, whatever
+ *   their ADR: while the drive plays, scans or holds a position. So the disc's subcode gives its
+ *   pregaps and indexes. A sector without subcode, or whose Q fails its CRC, reports a Q built
+ *   from the tracks, with no pregap but the first track's and no index above 1. The TOC's reports
+ *   are always built from the tracks.
+ * - A subcode provider, NULL for the disc's own, is called with user, the frame address and the 96
+ *   symbols the disc holds there, which it may change: for each sector the drive reports a position
+ *   in, a paused drive's too, and for each block it starts, once for a sector it reports and then
+ *   reads. It follows the sector provider's rules: a nonzero return fails the board, it runs
+ *   inside the call that ran the drive, must not change the board, and goes with the drive.
  * - The fed drive sends no subcode: its caller raises the flags and sets the symbol word, with
  *   cdblock_decoder_flags and cdblock_decoder_subcode.
  * - Unconfirmed: whether a real drive streams while paused, seeking or scanning, whether the
  *   interface chip sets flag 5 while its enable is clear, where a block's first frame falls against
  *   the sector's header flag (here at the same time, after it), what the sync frames carry, and the
- *   symbol word's bits above the symbol. */
+ *   symbol word's bits above the symbol. Also what a real drive reports for a Q it cannot read,
+ *   whether it reports a Q whose ADR is not 1 as it reads it, and how far a report's Q lags the
+ *   sector at the decoder input. */
 CDBLOCK_EXPORT int cdblock_drive_disc_subcode(cdblock_board *board, uint32_t frame_address, const uint8_t symbols[96]);
 typedef int (*cdblock_subcode_provider)(void *user, uint32_t frame_address, uint8_t symbols[96]);
 CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdblock_subcode_provider provider,
