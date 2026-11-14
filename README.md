@@ -533,12 +533,12 @@ Drive commands, each taking effect when its link frame ends:
 
 - `03` reads the TOC, `09` seeks and pauses, `06` plays, reading sectors on from its frame address,
   `02` is the ring seek, `08` pauses, `04` stops, and `0a` and `0b` scan forward and backward.
-- `05` (standby) stops as `04` does, and `0c` (open tray) opens the tray for good. What the two do
-  in a real drive is unknown, so both are unconfirmed.
+- `05` (standby) stops as `04` does, and `0c` (open tray) opens the tray, which stays open until
+  the caller closes it. What the two do in a real drive is unknown, so both are unconfirmed.
 - Byte 10 at 1 or 2 sets single or double speed. Whether a real drive takes the byte as its speed
   is unknown, so this is unconfirmed.
-- A command with a bad sum, or after the tray opened, is logged and not obeyed. An unknown command
-  fails the board.
+- A command with a bad sum is logged and not obeyed, as is any command while the tray is open and
+  any but `0c` while the drive has no disc. An unknown command fails the board.
 
 Seeks and reads:
 
@@ -600,6 +600,34 @@ Subcode:
   the sector's header flag (here at the same time), what the sync frames carry, and what the symbol
   word holds above the symbol.
 
+The tray and the disc:
+
+- The drive starts with its tray closed and a disc in. `cdblock_drive_disc_tray` opens and closes
+  the tray, and drive command `0c` opens it too.
+- An open tray stops the drive where it is. It hands over no more sectors or subcode, reports
+  status `80` and obeys no command until the caller closes it.
+- `cdblock_drive_disc_present` takes the disc out or puts one in, and fails while the tray is
+  closed. Taking the disc out clears its contents: the tracks, back to the one data track, and the
+  sectors, subcode and sector states given. The providers stay with the drive.
+- What the caller gives while the tray is open is the new disc's.
+- Closing on a disc starts the drive as it starts when selected, paused at frame address 150 at
+  double speed. Closing on an empty tray reports status `83`, and the drive then obeys only `0c`.
+- The link frames keep their times through an opening and a closing.
+- The tray and the disc stay through the board's reset, an open tray open, and a clone has both.
+- The CDB105 firmware answers status `80` by dropping what it knew of the disc, raising DCHG and
+  giving the host status 6, OPEN. After the close it reads the TOC again, or gives the host status
+  7, NODISC, for status `83`
+  ([tray and disc states](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#tray-and-disc-states)).
+- A play the host asks for while the tray is open makes the firmware send `03`, which the open
+  drive does not obey. The firmware keeps the request and carries it out on the disc the tray
+  closes on. Without a disc a play makes the firmware send `0c`, which opens the tray here.
+- Unconfirmed: the reports a real drive sends after its tray closes, their order and how long each
+  lasts. A drive has to spin up and look for a disc first, and here the first link frame after the
+  close already reports paused or no disc. Also what a drive obeys with its tray open or without a
+  disc, the bytes after the status in reports `80` and `83` (zeros here), whether a drive with an
+  open tray reports it from its first link frame after a reset, and what `0c` does in a drive whose
+  lid opens by hand.
+
 The landing:
 
 - A sector reaches DMA channel 0 as it arrives. The CDB105 firmware arms the channel only after the
@@ -619,9 +647,10 @@ read landing 4 frames early. A real drive's timing and answers
 are not confirmed. The log holds each command but 00, Null, and each report and sector. A link frame
 the SH-1 did not answer in full carries no command, and the link logs the strobes it missed.
 
-Not modeled: the drive's final byte asking for a repeat, which is always `00`, the tray closing
-again, the index and track bytes of a command, the TOC end report, a second session, pregaps, and
-the decoder's handling of audio and its status bits beyond the one the caller gives.
+Not modeled: the drive's final byte asking for a repeat, which is always `00`, statuses `81` and
+`82`, which this drive never sends, the index and track bytes of a command, the TOC end report, a
+second session, pregaps, and the decoder's handling of audio and its status bits beyond the one the
+caller gives.
 
 Bit 3 of a report's status, whose meaning is unknown, is always clear. Disc authentication sets its
 30-track flag only for a TOC of exactly 30 tracks whose lead-in reports are at least a quarter with
@@ -782,7 +811,8 @@ python -m cdblock --firmware dumps/cdb105.bin --card dumps/mpeg-card/vcd.bin
   code ranges, and the idle loop where the host lets the clock skip ahead while the firmware
   waits. Any other dump runs lenient.
 - `cdblock.disc` puts a disc in the disc drive for a known revision, with disc authentication's
-  ring built from the dump's own tables.
+  ring built from the dump's own tables. Its drive opens and closes the tray and changes the disc
+  while it is open.
 
 [`payload.py`](scripts/payload/payload.py) encodes and decodes extension payloads and card ROMs.
 In [`scripts/ring/`](scripts/ring/), `ring.py` replays disc authentication's checks and `make.py`
@@ -802,7 +832,8 @@ has that name, as on Windows.
   `make.py`'s sectors, and `payload.py`'s card ROM and back, through their command lines.
 - `package`: `python -m cdblock` on each revision with no card and with each card, sectors put and
   got, the lifecycle and module extensions as source, ELF, plain code and card ROM, the command
-  line, and the R-W subcode of an audio play through `20` (Get Subcode).
+  line, the R-W subcode of an audio play through `20` (Get Subcode), and the tray opened, closed on
+  another disc and closed on none.
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 

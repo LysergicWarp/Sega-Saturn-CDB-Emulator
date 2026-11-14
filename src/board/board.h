@@ -136,6 +136,12 @@ class Board final : public Sh1Port, public DrivePort
         if (link_timed())
             sh7034_.sci0_retime();
     }
+    // A call of the caller's moved the drive's next action, outside the drive's own turn.
+    void drive_moved()
+    {
+        drive_due = drive_.drive->due();
+        events_moved();
+    }
     // The drive's turn: bit 0 set when it started a link frame, bit 1 when a sector arrived.
     unsigned drive_turn();
     // Words on DREQ1 for DMA channel 1: in for transfers into memory, out for transfers to the host.

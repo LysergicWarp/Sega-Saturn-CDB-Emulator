@@ -285,8 +285,9 @@ typedef struct cdblock_drive_config
 CDBLOCK_EXPORT void cdblock_drive_config_defaults(cdblock_drive_config *config);
 /* config NULL for the defaults. */
 CDBLOCK_EXPORT int cdblock_drive_select_disc(cdblock_board *board, const cdblock_drive_config *config);
-/* The disc's contents, which stay through the board's reset and go with the drive when another
- * drive is selected. A raw sector of 2352 bytes, sync and header included, read at frame_address. */
+/* The disc's contents, which stay through the board's reset, until the disc is taken out, and go
+ * with the drive when another drive is selected. A raw sector of 2352 bytes, sync and header
+ * included, read at frame_address. */
 CDBLOCK_EXPORT int cdblock_drive_disc_sector(cdblock_board *board, uint32_t frame_address, const uint8_t *raw,
                                              size_t count);
 /* The tracks, numbered from 1: each its first frame address and its control/ADR byte, bit 6 set for
@@ -362,6 +363,28 @@ CDBLOCK_EXPORT int cdblock_drive_disc_subcode(cdblock_board *board, uint32_t fra
 typedef int (*cdblock_subcode_provider)(void *user, uint32_t frame_address, uint8_t symbols[96]);
 CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdblock_subcode_provider provider,
                                                        void *user);
+/* The tray and the disc. The drive starts with its tray closed and a disc in.
+ * - cdblock_drive_disc_tray opens the tray, open nonzero, or closes it. Opening stops the drive
+ *   where it is: it hands over no more sectors or subcode, reports status 80 and obeys no command
+ *   until the tray closes. Drive command 0c opens it too.
+ * - cdblock_drive_disc_present puts the disc in, present nonzero, or takes it out. It fails while
+ *   the tray is closed. Taking the disc out clears its contents: the tracks, back to the one data
+ *   track, and the sectors, subcode and sector states given. The providers stay with the drive.
+ * - The contents given while the tray is open are the new disc's. Those calls work with the tray
+ *   closed too.
+ * - Closing with a disc starts the drive as at power-on, paused at the first frame address at
+ *   double speed, which makes the firmware read the TOC. Closing without one reports status 83,
+ *   and the drive then obeys only command 0c.
+ * - The link frames keep their times through an opening and a closing.
+ * - The tray and the disc stay through the board's reset, an open tray open, and a clone has both.
+ * - Unconfirmed: the reports a real drive sends after its tray closes, their order and how long
+ *   each lasts. A drive has to spin up and look for a disc first, and here the first link frame
+ *   after the close already reports paused or no disc. Also what a drive obeys with its tray open
+ *   or without a disc, the bytes after the status in reports 80 and 83 (zeros here), whether a
+ *   drive with an open tray reports it from its first link frame after a reset, and what command
+ *   0c does in a drive whose lid opens by hand. */
+CDBLOCK_EXPORT int cdblock_drive_disc_tray(cdblock_board *board, int open);
+CDBLOCK_EXPORT int cdblock_drive_disc_present(cdblock_board *board, int present);
 
 /* MPEG card.
  * - cdblock_card_request pulses a data request count times, TIOCA1 for video or TIOCA0 for audio,

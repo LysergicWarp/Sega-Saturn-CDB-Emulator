@@ -21,6 +21,9 @@ known revision: strict, the clock skipping on at the profile's idle loop.
 - The drive's subcode provider in Python on CDB105, as the sector provider: what it leaves or
   replaces reaches the host as packs, and its exceptions come back from the run on the board that
   ran it.
+- The drive's tray on CDB105: an opening gives the host status open with DCHG, a closing on another
+  disc that disc's TOC through 02 and its sectors, 05 opens the tray through drive command 0c, and a
+  closing on an empty tray gives the status no disc.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -34,8 +37,8 @@ import pathlib
 from cdblock import __main__ as cli
 from cdblock import binding, strict
 from cdblock import extension as extensions
-from cdblock.disc import DATA, DATA_TRACK, FIRST, Disc, Drive, sector
-from cdblock.host import MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
+from cdblock.disc import DATA, DATA_TRACK, FIRST, LEAD_OUT, NO_DISC, OPEN, Disc, Drive, sector
+from cdblock.host import DCHG, DRDY, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
 
 from . import rw
 from .common import PROFILES, ROMS, EmulatorError, Suite, board
@@ -73,6 +76,11 @@ FIRST_PACK = rw.SECTOR_PACKS * SUBCODE_MARGIN - 11
 # The subcode provider's plays. Its replacing provider answers each sector with the subcode
 # generated for the one PROVIDED_SHIFT sectors further on.
 PROVIDED_SECTORS, PROVIDED_SHIFT = 8, 256
+# The tray case's second disc: an audio track after the data track and an earlier lead-out. 02
+# answers with the TOC's 102 entries, two words each: tracks 1 to 99, the first track, the last
+# track and the lead-out.
+CHANGED_TRACKS, CHANGED_LEAD_OUT = ((FIRST, DATA_TRACK), (30_000, AUDIO_TRACK)), 60_000
+TOC_ENTRIES, NO_TRACK = 102, 0xFFFFFFFF
 
 
 class ProviderStop(Exception):
@@ -332,25 +340,32 @@ def get_subcode(host):
     """20 type 1, Get Subcode R-W: None when it answers WAIT, or the error flags in CR4 and the
     pack's 24 symbols, moved through the FIFO and ended with 06, which sets no EHST here. A
     transfer that is not a pack's 12 words raises RunError before a word moves."""
-    board, name = host.board, "20 get subcode"
+    name = "20 get subcode"
     answer = host.command([0x2001, 0, 0, 0], name=name)
     status = answer[0] >> 8
     if status == REJECT:
         raise RunError(f"{name}: rejected")
     if status & WAIT:
         return None
-    total, data = (answer[0] & 0xFF) << 16 | answer[1], []
+    total = (answer[0] & 0xFF) << 16 | answer[1]
     if total != rw.PACK // 2:
         raise RunError(f"{name}: a transfer of {total} words, not a pack's {rw.PACK // 2}")
+    data = take_words(host, name, total)
+    return answer[3], [symbol for word in data for symbol in (word >> 8, word & 0xFF)]
+
+
+def take_words(host, name, total):
+    """The total words of the transfer a command opened, moved through the FIFO and ended with 06."""
+    data = []
 
     def move(_, n):
-        got = board.host_transfer(n)
+        got = host.board.host_transfer(n)
         data.extend(got)
         return len(got)
 
     host._transfer(name, move, total)
     host.command([0x0600, 0, 0, 0], name="06 end transfer")
-    return answer[3], [symbol for word in data for symbol in (word >> 8, word & 0xFF)]
+    return data
 
 
 def subcode_board(image):
@@ -516,6 +531,82 @@ def check_subcode_provider(suite, dumps):
         each.close()
 
 
+def get_toc(host):
+    """02, Get TOC: its entries, two words each as one value, moved through the FIFO and ended with
+    06, which sets no EHST here. A transfer that is not the TOC's 204 words raises RunError before
+    a word moves."""
+    name = "02 get TOC"
+    total = host.command([0x0200, 0, 0, 0], DRDY, name)[1]
+    if total != 2 * TOC_ENTRIES:
+        raise RunError(f"{name}: a transfer of {total} words, not the TOC's {2 * TOC_ENTRIES}")
+    data = take_words(host, name, total)
+    return [data[k] << 16 | data[k + 1] for k in range(0, total, 2)]
+
+
+def toc(tracks, lead_out):
+    """The TOC of a disc with tracks and lead_out, as 02 returns it: each track's control/ADR byte
+    and start, the first and the last track's number under its control/ADR byte, and the lead-out's
+    start under the last track's."""
+    entries = [control << 24 | start for start, control in tracks]
+    entries += [NO_TRACK] * (TOC_ENTRIES - 3 - len(tracks))
+    return entries + [tracks[0][1] << 24 | 1 << 16, tracks[-1][1] << 24 | len(tracks) << 16,
+                      tracks[-1][1] << 24 | lead_out]
+
+
+def check_tray(suite, dumps):
+    """A disc in the drive, then its tray opened, closed on a second disc, opened by the host with
+    05, closed on nothing and at last closed on the first disc again. The step of each opening and
+    closing ends on the host status it names, so a status that never comes fails the case."""
+    case = suite.case("cdb105 tray and disc change")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    bd = board(image, flags=HARNESS_FLAGS)
+    strict.apply(bd, profile, None)
+    host = Host(bd, idle=profile.IDLE)
+    drive = Drive(host)
+    first, second = Disc(image, header=None), Disc(image, header=None, tracks=CHANGED_TRACKS,
+                                                   lead_out=CHANGED_LEAD_OUT)
+    first.write(PROVIDED_FRAME_ADDRESS, WRITTEN)
+    second.write(PROVIDED_FRAME_ADDRESS, REPLACED)
+    try:
+        host.boot()
+        drive.insert(first)
+        case.check(get_toc(host) == toc(first.tracks, LEAD_OUT), "the first disc's TOC differs")
+        try:
+            drive.change(second)
+            case.check(False, "the disc changed with the tray closed")
+        except EmulatorError as error:
+            case.check("the tray is closed" in str(error), f"raised {error}")
+        case.check(drive.disc is first, "a refused change took the disc")
+
+        step = drive.open_tray()
+        case.check(step.flags & DCHG, "the opening set no DCHG")
+        case.equal(bd.host_response()[1:], [0xFFFF] * 3, "the position of an open tray")
+        drive.change(second)
+        drive.close_tray()
+        case.check(get_toc(host) == toc(CHANGED_TRACKS, CHANGED_LEAD_OUT), "the second disc's TOC differs")
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+        case.check(read_provided(bd, second, profile.IDLE) == REPLACED, "the second disc's sector did not arrive")
+
+        mark = bd.log_count()
+        host.command([0x0500, 0, 0, 0], name="05 open tray")
+        host.idle_until(lambda: bd.host_response()[0] >> 8 & 0x0F == OPEN, "05 open tray")
+        case.equal([e.text[:2] for e in bd.log(binding.LOG_DRIVE_COMMAND, mark)], ["0c"], "the drive commands of 05")
+        drive.change(None)
+        drive.close_tray()
+        case.equal(bd.host_response()[0] >> 8 & 0x0F, NO_DISC, "the status of an empty tray")
+        case.equal(bd.host_response()[1:], [0xFFFF] * 3, "the position of an empty tray")
+
+        drive.open_tray()
+        drive.change(first)
+        drive.close_tray()
+        case.check(get_toc(host) == toc(first.tracks, LEAD_OUT), "the first disc's TOC differs after the changes")
+        case.info["steps"] = [f"{s.name}: {s.instructions}" for s in host.steps]
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    bd.close()
+
+
 def cli_status(argv):
     output, errors = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -603,10 +694,11 @@ def run(context):
         check_sector_provider(suite, dumps)
         check_subcode(suite, dumps)
         check_subcode_provider(suite, dumps)
+        check_tray(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the providers and the subcode: need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, the providers, the subcode and the tray: need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 60)
+        suite.pin("cases", len(suite.cases), 61)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:

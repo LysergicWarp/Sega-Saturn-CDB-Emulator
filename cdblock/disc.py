@@ -21,6 +21,10 @@ None of the drive's behaviour comes from a real drive. Its reports follow what t
 accepts, its seek answers are Yabause's or the disc's own and its timing is the library's defaults
 unless settings change it. How often a real drive sends link frames, how far its reports lag its
 sectors and whether a pressed disc holds these sectors at the check positions are unknown.
+
+The tray opens and closes, and the disc changes while it is open: open_tray, change and close_tray
+below. What a real drive reports after its tray closes, and what it obeys while the tray is open or
+empty, is unconfirmed: here a closed tray reports paused or no disc from its first link frame.
 """
 import hashlib
 
@@ -42,8 +46,9 @@ IDENTIFIER, MAKER, PRODUCT = b"SEGA SEGASATURN ", b"SEGA TP".ljust(16), b"T-0".l
 # 70 columns. The special cases of zones 0 and 12, 42 frames for a low column in zone 0 and columns
 # modulo 39 or 19 in zone 12, still land on its columns.
 RING_ROWS, RING_COLUMNS = 15, 70
-# The host status code in the low bits of CR1's status byte while the drive pauses.
-PAUSE = 1
+# The host status codes in the low bits of CR1's status byte: the drive paused, its tray open and
+# its tray closed on no disc.
+PAUSE, OPEN, NO_DISC = 1, 6, 7
 
 
 class NotSupported(RunError):
@@ -219,6 +224,26 @@ class Drive:
 
     # What the host sees.
 
+    def _load(self, disc):
+        """The drive takes the disc's tracks, sectors, sector states, subcode and seek answers."""
+        board = self.board
+        board.drive_disc_tracks(disc.tracks, disc.lead_out)
+        for frame_address, raw in disc.sectors.items():
+            board.drive_disc_sector(frame_address, raw)
+        for frame_address, count, state, status in disc.states:
+            board.drive_disc_sector_state(frame_address, count, state, status)
+        for frame_address, symbols in disc.subcodes.items():
+            board.drive_disc_subcode(frame_address, symbols)
+        board.drive_disc_ring_provider(disc.seeks)
+        self.disc = disc
+
+    def _status(self, code, name, mark, start):
+        """The step that ends once the status in CR1 is code, as a Saturn reads it whenever the
+        SH-1 idles."""
+        board = self.board
+        self.host.idle_until(lambda: board.host_response()[0] >> 8 & 0x0F == code, name)
+        return self._step(name, mark, start)
+
     def insert(self, disc):
         """The disc goes into the drive, which starts paused at frame address 150 whatever the
         tracks. The SH-1 reads the TOC and seeks to the first frame address, and the step ends once
@@ -227,18 +252,38 @@ class Drive:
         board = self.board
         mark, start = board.log_count(), board.instructions
         board.drive_select_disc(**self.settings)
-        board.drive_disc_tracks(disc.tracks, disc.lead_out)
-        for frame_address, raw in disc.sectors.items():
-            board.drive_disc_sector(frame_address, raw)
-        for frame_address, count, state, status in disc.states:
-            board.drive_disc_sector_state(frame_address, count, state, status)
-        for frame_address, symbols in disc.subcodes.items():
-            board.drive_disc_subcode(frame_address, symbols)
-        if disc.seeks is not None:
-            board.drive_disc_ring_provider(disc.seeks)
-        self.disc = disc
-        self.host.idle_until(lambda: board.host_response()[0] >> 8 & 0x0F == PAUSE, "drive startup")
-        self._step("drive startup", mark, start)
+        self._load(disc)
+        self._status(PAUSE, "drive startup", mark, start)
+
+    def open_tray(self):
+        """The tray opens, the disc still in it, and the drive stops where it is. The SH-1 drops
+        what it knew of the disc and sets DCHG, and the step ends once the status in CR1 is open."""
+        self._ready("open tray", False)
+        board = self.board
+        mark, start = board.log_count(), board.instructions
+        board.drive_disc_tray(True)
+        return self._status(OPEN, "tray open", mark, start)
+
+    def change(self, disc):
+        """With the tray open, disc takes the place of what is in it, None for an empty tray. The
+        drive keeps its sector and subcode providers, and its seek answers are the new disc's."""
+        self._ready("change", False)
+        self.board.drive_disc_present(False)
+        self.disc = None
+        if disc is not None:
+            self._load(disc)
+            self.board.drive_disc_present(True)
+
+    def close_tray(self):
+        """The tray closes. On a disc the drive starts as insert has it, and the step ends once the
+        status in CR1 is pause. On an empty tray it ends once the status is no disc."""
+        self._ready("close tray", False)
+        board = self.board
+        mark, start = board.log_count(), board.instructions
+        board.drive_disc_tray(False)
+        if self.disc is None:
+            return self._status(NO_DISC, "tray closed", mark, start)
+        return self._status(PAUSE, "drive startup", mark, start)
 
     def authenticate(self, partition):
         """E0 subcode 0, the check reading into partition, then E1. The drive reads the header,

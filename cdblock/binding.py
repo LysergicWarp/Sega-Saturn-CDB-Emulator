@@ -120,6 +120,8 @@ FUNCTIONS = [
     ("cdblock_drive_disc_sector_provider", c_int, [Board, SectorProvider, ctypes.c_void_p]),
     ("cdblock_drive_disc_subcode", c_int, [Board, u32, P(u8)]),
     ("cdblock_drive_disc_subcode_provider", c_int, [Board, SubcodeProvider, ctypes.c_void_p]),
+    ("cdblock_drive_disc_tray", c_int, [Board, c_int]),
+    ("cdblock_drive_disc_present", c_int, [Board, c_int]),
     ("cdblock_card_request", c_int, [Board, c_int, ctypes.c_uint]),
     ("cdblock_card_interrupt", c_int, [Board, c_int]),
     ("cdblock_card_push_status", c_int, [Board, u16]),
