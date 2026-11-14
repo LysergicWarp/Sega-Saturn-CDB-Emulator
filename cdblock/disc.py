@@ -9,13 +9,14 @@ loop, 97 a sector besides the sector itself. Nothing here names a firmware addre
 loop needs a profile: on any other dump the disc operations are not supported.
 
 By default the disc has one data track from 00:02:00 with a Saturn header at its first frame
-address. Its tracks, the header's frame address, sectors that are missing or unreadable and each
-sector's R-W subcode can be set. It always holds disc authentication's ring at every check
-position, the sectors that scripts/ring/make.py builds from the dump's own tables. Which positions a
-check reads follows from the ITU4 count when the firmware recognizes the header, so the ring is
-there for any count, as on a pressed disc. The drive answers each authentication seek as Yabause's
-emulation does, with values that pass the seek checks, unless the disc has seek answers of its own:
-failing, passing or scripted, below.
+address. Its tracks, their pregaps, the header's frame address, sectors that are missing or
+unreadable and each sector's subcode can be set. A pregap is the Q of its sectors, which the drive
+reports: without one a track's reports start at index 1. It always holds disc authentication's ring
+at every check position, the sectors that scripts/ring/make.py builds from the dump's own tables.
+Which positions a check reads follows from the ITU4 count when the firmware recognizes the header,
+so the ring is there for any count, as on a pressed disc. The drive answers each authentication
+seek as Yabause's emulation does, with values that pass the seek checks, unless the disc has seek
+answers of its own: failing, passing or scripted, below.
 
 None of the drive's behaviour comes from a real drive. Its reports follow what the firmware
 accepts, its seek answers are Yabause's or the disc's own and its timing is the library's defaults
@@ -39,6 +40,7 @@ SECTOR, DATA, SUBCODE = 2352, 2048, 96
 FIRST = 150             # 00:02:00, the data track's first frame address
 LEAD_OUT = 283_800      # 63:04:00, the latest Sega's disc format standard allows
 DATA_TRACK = 0x41       # the control/ADR byte of a data track: bit 6 data, ADR 1
+PREGAP = 150            # two seconds, a pregap's usual length
 # The disc's Saturn header: the identifier, a third-party maker ID without a company code and a
 # product number. Every other field is 00, so the header names no extension.
 IDENTIFIER, MAKER, PRODUCT = b"SEGA SEGASATURN ", b"SEGA TP".ljust(16), b"T-0".ljust(10)
@@ -67,6 +69,22 @@ def sector(frame_address, mode=1, submode=0, data=b""):
         start = 24
     raw[start:start + len(data)] = data
     return bytes(raw)
+
+
+def q_symbols(q):
+    """A sector's 96 subcode symbols with q, a Q's ten bytes, in the Q channel: bit 6 of each
+    symbol, the most significant bit first, followed by the CRC as a disc holds it, inverted. The
+    other bits are 0."""
+    q = bytes(q)
+    if len(q) != 10:
+        raise ValueError(f"a Q is ten bytes before its CRC, not {len(q)}")
+    crc = 0
+    for byte in q:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = (crc << 1 ^ 0x1021 if crc & 0x8000 else crc << 1) & 0xFFFF
+    bits = q + (crc ^ 0xFFFF).to_bytes(2, "big")
+    return bytes((bits[k // 8] >> (7 - k % 8) & 1) << 6 for k in range(SUBCODE))
 
 
 class SeekAnswers:
@@ -146,6 +164,8 @@ class Disc:
         self.states = []
         self.sectors = {}
         self.subcodes = {}
+        # Each pregap's frames by its track's number.
+        self.pregaps = {}
         if header is not None:
             self.sectors[header] = sector(header, data=IDENTIFIER + MAKER + PRODUCT)
         for row in range(RING_ROWS):
@@ -167,12 +187,40 @@ class Disc:
         return count
 
     def write_subcode(self, frame_address, symbols):
-        """The R-W subcode of the sector at frame_address: its 96 symbols in disc order, R to W in
-        the low six bits of each. A sector without any sends zeros. Before insert, as write."""
+        """The subcode of the sector at frame_address: its 96 symbols in disc order, R to W in the
+        low six bits of each and the Q channel in bit 6. The drive sends each symbol whole, and its
+        position reports carry the Q when the Q's CRC holds. A sector without any sends zeros and
+        reports the Q built from the tracks. A missing or unreadable sector's subcode is sent and
+        reported too. Before insert, as write."""
         symbols = bytes(symbols)
         if len(symbols) != SUBCODE:
             raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
         self.subcodes[frame_address] = symbols
+
+    def pregap(self, track, frames=PREGAP):
+        """Track number track, the second or a later one, gets a pregap: the frames before its
+        start hold a Q that names the track at index 0, with its control/ADR byte and a relative
+        time that counts down to zero in the last of them. The drive reports that Q there, and the
+        track at index 1 from its start. The Q takes bit 6 of those sectors' symbols and leaves
+        subcode written there its other bits. Before insert, as write."""
+        if not 2 <= track <= len(self.tracks):
+            raise ValueError(f"a pregap goes before track 2 to {len(self.tracks)}, not {track}")
+        if not 0 < frames < self.tracks[track - 1][0] - self.tracks[track - 2][0]:
+            raise ValueError(f"a pregap of {frames} frames does not fit in the track before track {track}")
+        self.pregaps[track] = frames
+
+    def subcode(self):
+        """Each sector's subcode as the drive takes it: the symbols written, and the Q of the
+        pregaps in bit 6."""
+        merged = dict(self.subcodes)
+        for track, frames in self.pregaps.items():
+            start, control = self.tracks[track - 1]
+            for frame_address in range(start - frames, start):
+                q = (bytes([control, _make.bcd(track), 0]) + _make.bcd_address(start - 1 - frame_address) + b"\0"
+                     + _make.bcd_address(frame_address))
+                written = merged.get(frame_address, bytes(SUBCODE))
+                merged[frame_address] = bytes(symbol & 0xBF | bit for symbol, bit in zip(written, q_symbols(q)))
+        return merged
 
     def missing(self, frame_address, count=1):
         """count frames from frame_address on hold no sector: the drive passes them with nothing to
@@ -232,7 +280,7 @@ class Drive:
             board.drive_disc_sector(frame_address, raw)
         for frame_address, count, state, status in disc.states:
             board.drive_disc_sector_state(frame_address, count, state, status)
-        for frame_address, symbols in disc.subcodes.items():
+        for frame_address, symbols in disc.subcode().items():
             board.drive_disc_subcode(frame_address, symbols)
         board.drive_disc_ring_provider(disc.seeks)
         self.disc = disc

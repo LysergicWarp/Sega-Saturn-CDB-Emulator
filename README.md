@@ -561,9 +561,23 @@ Reports:
 - The TOC lists each track's start, then points A0 with the first track and disc type 0, A1 with
   the last track and A2 with the lead-out, over and over. A0 carries the first track's control byte
   and A1 and A2 the last track's, unconfirmed.
-- A position report names the track holding the position, its control byte, index 1 and the time
-  in the track. Past the lead-out the track is `aa`.
-- Index 0 counts down only before the first track: there are no pregaps between tracks.
+- A position report carries the Q the disc holds at the position, the ten bytes after its status:
+  control/ADR, track, index, the time in the track, a zero and the absolute time. The Q is bit 6 of
+  the sector's 96 subcode symbols, with a CRC. The drive reports it while it plays, scans or holds
+  a position, whatever its ADR.
+- The disc's subcode so gives its pregaps and indexes: in a pregap the Q names the coming track at
+  index 0 with a time that counts down to zero in the pregap's last frame. CDB105 takes a play
+  that reaches index 0 of a track of the other kind up again from that track
+  ([playing, scanning and pausing](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#playing-scanning-and-pausing)).
+- A sector without subcode, or whose Q fails its CRC, reports a Q built from the tracks: the track
+  holding the position, its control byte, index 1 and the time in the track. Past the lead-out the
+  track is `aa`. Index 0 counts down only before the first track, to zero in the frame before its
+  start, so a disc without subcode has no pregaps between its tracks.
+- Unconfirmed: what a real drive reports for a Q it cannot read, whether it reports a Q whose ADR
+  is not 1 as it reads it, which Q a paused drive reports (here the Q of the sector it holds, in
+  every link frame), what the Q holds past the lead-out, and which sector's Q a report carries
+  against the sector at the decoder input (here the report after a sector carries the next
+  sector's).
 - The ring seek answers as Yabause's drive emulation does: status `b6`, report word `44f1` and bytes
   `09 09 09 09`. A provider set with `cdblock_drive_disc_ring_provider` can answer each seek
   instead, given its target, or fail the board.
@@ -591,15 +605,19 @@ Subcode:
 - Each frame sets the symbol word (`0x0a000018`) and raises decoder flag 5. The first frame of a
   block raises flag 6 with it. IRQ7 follows the enables the firmware wrote.
 - `cdblock_drive_disc_subcode` gives a sector its 96 symbols in disc order, R to W in the low six
-  bits of each byte. A sector without any sends zeros.
+  bits of each byte and the Q channel in bit 6. A sector without any sends zeros.
 - Frames 0 to 95 carry the symbols, each byte whole. Frames 96 and 97, the sync frames, leave the
   last symbol in the word.
 - The stream runs on data reads as on audio, and for missing and unreadable sectors too. It stops
   when the drive leaves the read: a pause, seek, stop or scan ends the block being sent.
 - A subcode provider set with `cdblock_drive_disc_subcode_provider` serves the symbols from the
-  caller as each block starts, under the sector provider's rules. It is asked for missing sectors
-  too.
-- The P and Q channels are not in the stream: the drive reports them over the link.
+  caller, under the sector provider's rules. It is asked for each sector the drive reports a
+  position in, a paused drive's too, and for each block the drive starts, once for a sector it
+  reports and then reads. A drive that holds a position asks once for it, and again after subcode
+  is written, a provider is set, the tray closes or the board is reset. It is asked for missing
+  sectors too.
+- Bit 6 of each symbol is the Q channel, which the drive reports over the link. The symbols go to
+  the interface chip whole. The P channel is not used.
 - The fed drive sends no subcode. Its caller raises the flags and sets the symbol word.
 - Unconfirmed: whether a real drive streams while paused, seeking or scanning, whether the
   interface chip sets flag 5 while its enable is clear, where a block's first frame falls against
@@ -655,8 +673,8 @@ the SH-1 did not answer in full carries no command, and the link logs the strobe
 
 Not modeled: the drive's final byte asking for a repeat, which is always `00`, statuses `81` and
 `82`, which this drive never sends, the index and track bytes of a command, the TOC end report, a
-second session, pregaps, and the decoder's handling of audio and its status bits beyond the one the
-caller gives.
+second session, the lead-in's own Q, and the decoder's handling of audio and its status bits beyond
+the one the caller gives.
 
 Bit 3 of a report's status, whose meaning is unknown, is always clear. Disc authentication sets its
 30-track flag only for a TOC of exactly 30 tracks whose lead-in reports are at least a quarter with
@@ -818,7 +836,7 @@ python -m cdblock --firmware dumps/cdb105.bin --card dumps/mpeg-card/vcd.bin
   waits. Any other dump runs lenient.
 - `cdblock.disc` puts a disc in the disc drive for a known revision, with disc authentication's
   ring built from the dump's own tables. Its drive opens and closes the tray and changes the disc
-  while it is open.
+  while it is open. A track of its disc takes a pregap, written as the Q of the pregap's sectors.
 
 [`payload.py`](scripts/payload/payload.py) encodes and decodes extension payloads and card ROMs.
 In [`scripts/ring/`](scripts/ring/), `ring.py` replays disc authentication's checks and `make.py`
@@ -838,8 +856,8 @@ has that name, as on Windows.
   `make.py`'s sectors, and `payload.py`'s card ROM and back, through their command lines.
 - `package`: `python -m cdblock` on each revision with no card and with each card, sectors put and
   got, the lifecycle and module extensions as source, ELF, plain code and card ROM, the command
-  line, the R-W subcode of an audio play through `20` (Get Subcode), and the tray opened, closed on
-  another disc and closed on none.
+  line, the R-W subcode of an audio play through `20` (Get Subcode), the tray opened, closed on
+  another disc and closed on none, and reads that run into the pregap of a track of the other kind.
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 

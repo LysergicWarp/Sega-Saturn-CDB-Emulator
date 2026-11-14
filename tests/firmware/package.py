@@ -24,6 +24,10 @@ known revision: strict, the clock skipping on at the profile's idle loop.
 - The drive's tray on CDB105: an opening gives the host status open with DCHG, a closing on another
   disc that disc's TOC through 02 and its sectors, 05 opens the tray through drive command 0c, and a
   closing on an empty tray gives the status no disc.
+- Pregaps on CDB105: a read through 10 that runs from the data track into an audio track's pregap
+  gives the host the data track's sectors, and the firmware plays on from the audio track's index 1.
+  A play that runs from the audio track into a data track's pregap is read on from the frame before
+  that track's start at double speed, and the host gets the data track's sectors.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -37,7 +41,8 @@ import pathlib
 from cdblock import __main__ as cli
 from cdblock import binding, strict
 from cdblock import extension as extensions
-from cdblock.disc import DATA, DATA_TRACK, FIRST, LEAD_OUT, NO_DISC, OPEN, Disc, Drive, sector
+from cdblock.disc import (DATA, DATA_TRACK, FIRST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SUBCODE, Disc, Drive,
+                          sector)
 from cdblock.host import DCHG, DRDY, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
 
 from . import rw
@@ -81,6 +86,11 @@ PROVIDED_SECTORS, PROVIDED_SHIFT = 8, 256
 # track and the lead-out.
 CHANGED_TRACKS, CHANGED_LEAD_OUT = ((FIRST, DATA_TRACK), (30_000, AUDIO_TRACK)), 60_000
 TOC_ENTRIES, NO_TRACK = 102, 0xFFFFFFFF
+# The pregap case's disc: the data track, the audio track and a second data track, the later two
+# with a pregap each. Each of its reads runs from PREGAP_BEFORE sectors before a pregap to
+# PREGAP_AFTER sectors into the track.
+LATER_DATA_START = 21_000
+PREGAP_BEFORE, PREGAP_AFTER = 10, 40
 
 
 class ProviderStop(Exception):
@@ -496,7 +506,8 @@ def check_subcode_provider(suite, dumps):
         seen = {}
         left = provided(lambda frame_address, symbols: seen.update({frame_address: symbols}))
         check_packs(case, "subcode left alone", played(left), PROVIDED_SECTORS)
-        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == rw.sector(frame_address - first)
+        # The drive asks for the sector at each position it reports too, where this disc holds none.
+        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == disc.subcodes.get(frame_address, bytes(SUBCODE))
                                                       for frame_address, symbols in seen.items()),
                    "the provider saw other subcode than the disc's")
         case.info["frame_addresses"] = sorted(seen)
@@ -607,6 +618,72 @@ def check_tray(suite, dumps):
     bd.close()
 
 
+def check_pregap(suite, dumps):
+    """Two reads through 10 that each run into a track of the other kind with a pregap. From the
+    data track into the audio track: at the pregap's index 0 the firmware plays on from the audio
+    track's index 1 at single speed, and the host gets the data track's sectors up to the pregap.
+    From the audio track into the second data track: at the pregap's index 0 the firmware reads on
+    from the frame before the data track's start at double speed, and the host gets that track's
+    sectors. Each time it pauses the drive at the read's end."""
+    case = suite.case("cdb105 pregap")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    bd = board(image, flags=HARNESS_FLAGS)
+    strict.apply(bd, profile, None)
+    host = Host(bd, idle=profile.IDLE)
+    drive = Drive(host)
+    disc = Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK),
+                                            (LATER_DATA_START, DATA_TRACK)))
+    count = PREGAP_BEFORE + PREGAP + PREGAP_AFTER
+    into_audio, into_data = AUDIO_START - PREGAP - PREGAP_BEFORE, LATER_DATA_START - PREGAP - PREGAP_BEFORE
+    before = b"".join(f"sector {into_audio + k}".encode().ljust(DATA, b"\0") for k in range(PREGAP_BEFORE))
+    after = b"".join(f"sector {LATER_DATA_START + k}".encode().ljust(DATA, b"\0") for k in range(PREGAP_AFTER))
+    disc.write(into_audio, before)
+    disc.write(LATER_DATA_START, after)
+    try:
+        disc.pregap(1)
+        case.check(False, "the first track took a pregap")
+    except ValueError as error:
+        case.check("track 2" in str(error), f"raised {error}")
+    disc.pregap(2)
+    disc.pregap(3)
+    q = bytes(sum((symbol >> 6 & 1) << (7 - bit) for bit, symbol in enumerate(disc.subcode()[frame][k * 8:k * 8 + 8]))
+              for frame in (AUDIO_START - PREGAP, AUDIO_START - 1) for k in range(10))
+    case.equal(q.hex(" "), "01 02 00 00 01 74 00 04 24 50 01 02 00 00 00 00 00 04 26 49",
+               "the Q of the audio track's pregap, its first and last frame")
+
+    def crossed(partition, first, play, control, track, sectors, data, what):
+        """A read of count sectors from first into partition, which the firmware takes up again
+        with play: the frame address, index, track and speed of the drive command it sends."""
+        mark = bd.log_count()
+        drive.read_sectors(partition, first, count)
+        host.idle_until(lambda: bd.host_response()[0] >> 8 & 0x0F == PAUSE, "the pause after the read")
+        commands = [bytes.fromhex("".join(e.text.split()[:13])) for e in bd.log(binding.LOG_DRIVE_COMMAND, mark)]
+        case.equal([command[0] for command in commands], [0x06, 0x06, 0x08], f"the drive commands of the read {what}")
+        if len(commands) == 3:
+            sent = commands[1]
+            case.equal([int.from_bytes(sent[1:4], "big"), sent[4], sent[8], sent[10]], play,
+                       f"the frame address, index, track and speed of the play sent at the pregap {what}")
+        case.equal(bd.host_response()[1:], [control << 8 | track, 0x0100 | (first + count) >> 16,
+                                            (first + count) & 0xFFFF], f"the position after the read {what}")
+        case.equal(host.command([0x5100, 0, partition << 8, 0], name="51 get sector number")[3], sectors,
+                   f"sectors in the partition {what}")
+        got = b"".join(word.to_bytes(2, "big") for word in host.get(partition, 0, sectors, sectors * DATA // 2))
+        case.check(got == data, f"the data track's sectors did not arrive {what}")
+
+    try:
+        host.boot()
+        drive.insert(disc)
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+        crossed(0, into_audio, [AUDIO_START, 1, 2, 1], AUDIO_TRACK, 2, PREGAP_BEFORE, before, "into the audio track")
+        crossed(1, into_data, [LATER_DATA_START - 1, 0, 0, 2], DATA_TRACK, 3, PREGAP_AFTER, after,
+                "into the data track")
+        case.info["steps"] = [f"{s.name}: {s.instructions}" for s in host.steps]
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    bd.close()
+
+
 def cli_status(argv):
     output, errors = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -695,10 +772,12 @@ def run(context):
         check_subcode(suite, dumps)
         check_subcode_provider(suite, dumps)
         check_tray(suite, dumps)
+        check_pregap(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the providers, the subcode and the tray: need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray and the pregap: "
+                   "need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 61)
+        suite.pin("cases", len(suite.cases), 62)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:

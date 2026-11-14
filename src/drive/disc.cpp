@@ -48,6 +48,27 @@ void msf(uint8_t *p, uint32_t frame_address)
     p[2] = bcd(frame_address % 75);
 }
 
+// The Q channel of a sector's subcode, bit 6 of each symbol: 96 bits, the most significant first,
+// which make ten bytes and their CRC. The disc holds the CRC inverted. Copies the ten bytes to q
+// when the CRC holds.
+bool q_of(const Subcode &symbols, uint8_t *q)
+{
+    uint8_t bytes[12] = {};
+    for (size_t i = 0; i < symbols.size(); ++i)
+        bytes[i / 8] = uint8_t(bytes[i / 8] << 1 | (symbols[i] >> 6 & 1));
+    unsigned crc = 0;
+    for (size_t i = 0; i < 10; ++i)
+    {
+        crc ^= unsigned(bytes[i]) << 8;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc & 0x8000 ? crc << 1 ^ 0x1021 : crc << 1) & 0xffff;
+    }
+    if ((~crc & 0xffff) != (unsigned(bytes[10]) << 8 | bytes[11]))
+        return false;
+    std::copy(bytes, bytes + 10, q);
+    return true;
+}
+
 std::string text(const uint8_t *bytes, size_t count)
 {
     std::string out;
@@ -106,6 +127,8 @@ void DiscDrive::start()
     toc_entry = 0;
     seeking = backward = false;
     seek_until = subcode_at = 0;
+    // The disc may be another one, or its provider serve another, since the sector was taken.
+    taken = false;
 }
 
 void DiscDrive::reset(uint64_t now)
@@ -215,11 +238,16 @@ void DiscDrive::tick(DrivePort &port, uint64_t now)
 std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
 {
     std::array<uint8_t, link_frame_size> b{};
-    // A Q report of the position: the control/ADR byte, track and index of the track holding it
-    // (BCD), the time in the track and the absolute time. Before the first track index 0 counts
-    // down to it, past the lead-out the track is aa. No pregaps between tracks.
+    // A Q report of the position. The Q the disc holds there fills the ten bytes after the status,
+    // whatever its ADR. A real drive's report for a sector whose Q it cannot read is unconfirmed:
+    // here, as for a sector without subcode, the drive builds one from the tracks. That Q has the
+    // control/ADR byte, track and index of the track holding the position (BCD), the time in the
+    // track and the absolute time. Before the first track index 0 counts down to zero in the frame
+    // before it, past the lead-out the track is aa, and there are no pregaps between tracks.
     auto q = [&](uint8_t status) {
         b[report_status] = status;
+        if (q_of(symbols_at(position), &b[report_control]))
+            return;
         if (position >= lead_out)
         {
             b[report_control] = tracks.back().control;
@@ -232,7 +260,7 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
             b[report_control] = tracks.front().control;
             b[report_track] = 1;
             b[report_index] = 0;
-            msf(&b[report_relative], tracks.front().start - position);
+            msf(&b[report_relative], tracks.front().start - 1 - position);
         }
         else
         {
@@ -458,15 +486,27 @@ void DiscDrive::deliver(DrivePort &port, uint32_t frame_address)
     port.note(DrivePort::Note::Sector, frame_address, uint32_t(moved), text);
 }
 
+const Subcode &DiscDrive::symbols_at(uint32_t frame_address)
+{
+    // A sector the drive reports and then reads asks the provider once.
+    if (taken && taken_address == frame_address)
+        return taken_symbols;
+    const auto found = subcodes.find(frame_address);
+    taken_symbols = found != subcodes.end() ? found->second : Subcode{};
+    taken = false;
+    if (subcode_provider)
+        if (const int stop = subcode_provider(frame_address, taken_symbols.data()))
+            throw std::runtime_error("the subcode provider stopped the run with status " + std::to_string(stop) +
+                                     " at frame address " + std::to_string(frame_address));
+    taken_address = frame_address;
+    taken = true;
+    return taken_symbols;
+}
+
 void DiscDrive::stream(DrivePort &port, uint32_t frame_address, uint64_t now)
 {
     // The subcode has lines of its own, so a missing or unreadable sector still sends its block.
-    const auto found = subcodes.find(frame_address);
-    block = found != subcodes.end() ? found->second : Subcode{};
-    if (subcode_provider)
-        if (const int stop = subcode_provider(frame_address, block.data()))
-            throw std::runtime_error("the subcode provider stopped the run with status " + std::to_string(stop) +
-                                     " at frame address " + std::to_string(frame_address));
+    block = symbols_at(frame_address);
     block_at = now;
     block_period = period();
     block_frame = 0;

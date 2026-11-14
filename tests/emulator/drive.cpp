@@ -169,7 +169,7 @@ bool summed(const std::vector<uint8_t> &report)
 // A Q report of a frame address in the data track, as the drive sends it.
 std::vector<uint8_t> q(uint8_t status, uint32_t frame_address)
 {
-    const uint32_t relative = frame_address >= 150 ? frame_address - 150 : 150 - frame_address;
+    const uint32_t relative = frame_address >= 150 ? frame_address - 150 : 149 - frame_address;
     std::vector<uint8_t> r = {status,
                               0x41,
                               0x01,
@@ -441,7 +441,8 @@ void disc_drive_tracks()
     CHECK(at(1200) == report(0x46, 0x01, 0x02, 1, 200, 1200));
     CHECK(at(1000) == report(0x46, 0x01, 0x02, 1, 0, 1000));
     CHECK(at(999) == report(0x46, 0x41, 0x01, 1, 849, 999));
-    CHECK(at(100) == report(0x46, 0x41, 0x01, 0, 50, 100));
+    CHECK(at(100) == report(0x46, 0x41, 0x01, 0, 49, 100));
+    CHECK(at(149) == report(0x46, 0x41, 0x01, 0, 0, 149));
     CHECK(at(2100) == report(0x46, 0x01, 0xaa, 1, 100, 2100));
     // The board's reset keeps the disc.
     CHECK(cdblock_reset(b) == 0);
@@ -997,18 +998,21 @@ void disc_drive_subcode()
     const auto sectors = b.log(CDBLOCK_LOG_DRIVE_SECTOR);
     CHECK(sectors.size() == 5 && sectors[1].address == 1001 && sectors[2].address == 1003);
 
-    // At double speed the frames come twice as fast. A provider sees the disc's symbols as each
-    // block starts, a missing sector's too, and what it changes is sent.
+    // At double speed the frames come twice as fast. A provider sees the disc's symbols as the
+    // drive reports each sector's position, the paused drive's and a missing sector's too, a
+    // report before the sector's block starts. What it changes is sent. Its symbols hold no Q
+    // here, so the reports are the ones built from the tracks.
     CHECK(cdblock_drive_disc_subcode_provider(b, provide_subcode, &subcodes) == 0);
     peer.frames.clear();
-    CHECK(command(peer, 0x06, 1001, 2) == q(0x36, 1001) && peer.frames.empty() && subcodes.frame_addresses.empty());
-    peer.link_frame();
-    CHECK((subcodes.frame_addresses == std::vector<uint32_t>{1001}) &&
+    CHECK(command(peer, 0x06, 1001, 2) == q(0x36, 1001) && peer.frames.empty());
+    CHECK((subcodes.frame_addresses == std::vector<uint32_t>{1006, 1001}) &&
           subcodes.given == std::vector<uint8_t>(written, written + 96));
     peer.link_frame();
     CHECK(subcodes.frame_addresses.back() == 1002 && subcodes.given == std::vector<uint8_t>(other, other + 96));
     peer.link_frame();
-    CHECK(subcodes.frame_addresses.size() == 3 && subcodes.given == std::vector<uint8_t>(96, 0));
+    CHECK(subcodes.frame_addresses.back() == 1003 && subcodes.given == std::vector<uint8_t>(96, 0));
+    peer.link_frame();
+    CHECK(subcodes.frame_addresses.size() == 5 && subcodes.frame_addresses.back() == 1004);
     uint8_t marked[96];
     std::copy(written, written + 96, marked);
     marked[0] = uint8_t(1001);
@@ -1020,7 +1024,7 @@ void disc_drive_subcode()
     CHECK(block_sent(peer.frames, 98, double_speed, marked));
     const size_t part = 13 * strobe * 98 / double_speed + 1;
     CHECK(peer.frames.size() == 2 * 98 + part);
-    // A copy goes on with the block being sent, and asks the same provider for the next.
+    // A copy goes on with the block being sent, and asks the same provider for the next report.
     const auto starts = [](const Peer::Frame &frame) { return frame.start; };
     cdblock_board *raw_copy = cdblock_clone(b);
     CHECK(raw_copy != nullptr);
@@ -1030,7 +1034,7 @@ void disc_drive_subcode()
         Board copy(raw_copy);
         Peer copied(copy, nullptr, false);
         copied.link_frame();
-        CHECK(subcodes.frame_addresses.size() == 4 && subcodes.frame_addresses.back() == 1004);
+        CHECK(subcodes.frame_addresses.size() == 6 && subcodes.frame_addresses.back() == 1005);
         CHECK(copied.frames.size() == 98 && !copied.frames.front().start &&
               std::count_if(copied.frames.begin(), copied.frames.end(), starts) == 1);
     }
@@ -1064,7 +1068,7 @@ void disc_drive_subcode()
     CHECK(cdblock_clock_cycles(b) >= block_end && peer.frames.empty());
     command(peer, 0x06, 1001, 2);
     peer.link_frame();
-    CHECK(subcodes.frame_addresses.back() == 1001 && !peer.frames.empty() && peer.frames.front().start &&
+    CHECK(subcodes.frame_addresses.back() == 1002 && !peer.frames.empty() && peer.frames.front().start &&
           peer.frames.front().word == uint8_t(1001));
     // NULL gives the disc's own symbols again from the next block, and a new drive has neither
     // provider nor subcode.
@@ -1088,6 +1092,195 @@ void disc_drive_subcode()
     CHECK(peer.failed && contains(b.error(), "subcode provider stopped the run with status 5 at frame address 1002") &&
           subcodes.frame_addresses.back() == 1002);
     CHECK(b.run(1) == CDBLOCK_EXIT_ERROR && contains(b.error(), "reset"));
+}
+
+using Q = std::array<uint8_t, 10>;
+
+// A Q in the program area: control/ADR, track and index, the relative time and the absolute time of
+// frame_address.
+Q q_at(uint8_t control, uint8_t track, uint8_t index, uint32_t relative, uint32_t frame_address)
+{
+    return {control,
+            track,
+            index,
+            bcd(relative / 4500),
+            bcd(relative / 75 % 60),
+            bcd(relative % 75),
+            0,
+            bcd(frame_address / 4500),
+            bcd(frame_address / 75 % 60),
+            bcd(frame_address % 75)};
+}
+
+// A sector's 96 symbols with the Q channel's twelve bytes in bit 6 of each, the most significant bit
+// first. The low six bits count up.
+std::array<uint8_t, 96> channel_symbols(const std::array<uint8_t, 12> &bytes)
+{
+    std::array<uint8_t, 96> symbols{};
+    for (size_t i = 0; i < symbols.size(); ++i)
+        symbols[i] = uint8_t(unsigned(bytes[i / 8] >> (7 - i % 8) & 1) << 6 | unsigned(i & 0x3f));
+    return symbols;
+}
+
+// A sector's 96 symbols with q in the Q channel, followed by its CRC, inverted as a disc holds it,
+// or with one bit of it wrong.
+std::array<uint8_t, 96> q_symbols(const Q &q, bool wrong = false)
+{
+    unsigned crc = 0;
+    for (const uint8_t byte : q)
+    {
+        crc ^= unsigned(byte) << 8;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc & 0x8000 ? crc << 1 ^ 0x1021 : crc << 1) & 0xffff;
+    }
+    crc = (~crc ^ (wrong ? 1u : 0u)) & 0xffff;
+    std::array<uint8_t, 12> bytes{};
+    std::copy(q.begin(), q.end(), bytes.begin());
+    bytes[10] = uint8_t(crc >> 8);
+    bytes[11] = uint8_t(crc);
+    return channel_symbols(bytes);
+}
+
+// The report that carries q after status.
+std::vector<uint8_t> q_report(uint8_t status, const Q &q)
+{
+    std::vector<uint8_t> r = {status};
+    r.insert(r.end(), q.begin(), q.end());
+    uint8_t sum = 0;
+    for (const uint8_t byte : r)
+        sum = uint8_t(sum + byte);
+    r.push_back(uint8_t(~sum));
+    r.push_back(0);
+    return r;
+}
+
+// A subcode provider that counts its calls and gives every sector a Q of its track, index 2.
+struct Qs
+{
+    size_t calls = 0;
+    uint8_t track = 0x05;
+    int stop = 0;
+};
+
+Q provided_q(uint32_t frame_address, uint8_t track = 0x05)
+{
+    return q_at(0x41, track, 0x02, frame_address - 150, frame_address);
+}
+
+int provide_q(void *user, uint32_t frame_address, uint8_t *symbols)
+{
+    Qs &qs = *static_cast<Qs *>(user);
+    ++qs.calls;
+    const auto given = q_symbols(provided_q(frame_address, qs.track));
+    std::copy(given.begin(), given.end(), symbols);
+    return qs.stop;
+}
+
+void disc_drive_q()
+{
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    cdblock_drive_config config;
+    cdblock_drive_config_defaults(&config);
+    config.landing_frames = 0; // reads start at their frame address: this test checks what they report
+    config.seek_cycles = 0;
+    config.scan_frames = 2;
+    Peer peer(b, &config);
+    auto command = [&](Peer &to, uint8_t code, uint32_t frame_address) {
+        to.stage(code, frame_address, 2);
+        to.link_frame();
+        return to.link_frame();
+    };
+    // A data track, an audio track from 1000 and the lead-out at 2000. The disc's subcode gives the
+    // audio track a pregap from 990: index 0 and a relative time that counts down to zero in the
+    // pregap's last frame.
+    const cdblock_track tracks[2] = {{150, 0x41}, {1000, 0x01}};
+    CHECK(cdblock_drive_disc_tracks(b, tracks, 2, 2000) == 0);
+    auto pregap = [](uint32_t frame_address) { return q_at(0x01, 0x02, 0x00, 999 - frame_address, frame_address); };
+    for (uint32_t frame_address = 990; frame_address < 1000; ++frame_address)
+        CHECK(cdblock_drive_disc_subcode(b, frame_address, q_symbols(pregap(frame_address)).data()) == 0);
+    // A Q that names another place than the tracks do, one whose CRC is wrong, and one of ADR 2.
+    const Q elsewhere = q_at(0x41, 0x07, 0x03, 4703, 18381);
+    const Q catalogue = {0x42, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x30, 0x00, 0x52};
+    const auto held = q_symbols(elsewhere);
+    CHECK(cdblock_drive_disc_subcode(b, 500, held.data()) == 0);
+    CHECK(cdblock_drive_disc_subcode(b, 501, q_symbols(elsewhere, true).data()) == 0);
+    CHECK(cdblock_drive_disc_subcode(b, 502, q_symbols(catalogue).data()) == 0);
+    // A Q with its CRC written out, not computed here: 2832 is the CRC of these ten bytes by
+    // x^16 + x^12 + x^5 + 1 from zero, inverted. And the same Q with that CRC not inverted.
+    const std::array<uint8_t, 12> written = {0x41, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x28, 0x32};
+    std::array<uint8_t, 12> plain = written;
+    plain[10] = 0xd7;
+    plain[11] = 0xcd;
+    CHECK(cdblock_drive_disc_subcode(b, 800, channel_symbols(written).data()) == 0);
+    CHECK(cdblock_drive_disc_subcode(b, 801, channel_symbols(plain).data()) == 0);
+
+    // A paused drive reports the Q the disc holds at its position, in every link frame.
+    CHECK(command(peer, 0x09, 500) == q_report(0x46, elsewhere));
+    CHECK(peer.link_frame() == q_report(0x46, elsewhere));
+    // The Q with the written CRC is reported, and the one whose CRC is not inverted is not.
+    CHECK(command(peer, 0x09, 800) == q_report(0x46, q_at(0x41, 0x01, 0x01, 0, 150)));
+    CHECK(command(peer, 0x09, 801) == q(0x46, 801));
+    // A read reports each sector's Q as the disc holds it, whatever its ADR. A sector without
+    // subcode and one whose Q fails its CRC report the Q built from the tracks.
+    CHECK(command(peer, 0x06, 499) == q(0x36, 499));
+    CHECK(peer.link_frame() == q_report(0x36, elsewhere));
+    CHECK(peer.link_frame() == q(0x36, 501));
+    CHECK(peer.link_frame() == q_report(0x36, catalogue));
+    CHECK(peer.link_frame() == q(0x36, 503));
+    // The symbols go to the interface whole as before, the Q's bit with them.
+    CHECK(block_sent(peer.frames, 98, double_speed, held.data()));
+    // A scan reports it too.
+    CHECK(command(peer, 0x09, 498) == q(0x46, 498));
+    CHECK(command(peer, 0x0a, 0) == q_report(0x56, elsewhere));
+
+    // A read into the pregap: the first track at index 1, then the second at index 0 with its time
+    // counting down, then at index 1 from its start, where the disc holds no subcode.
+    CHECK(command(peer, 0x06, 988) == q(0x36, 988));
+    CHECK(peer.link_frame() == q(0x36, 989));
+    for (uint32_t frame_address = 990; frame_address < 1000; ++frame_address)
+        CHECK(peer.link_frame() == q_report(0x36, pregap(frame_address)));
+    CHECK(peer.link_frame() == q_report(0x36, q_at(0x01, 0x02, 0x01, 0, 1000)));
+    CHECK(peer.link_frame() == q_report(0x36, q_at(0x01, 0x02, 0x01, 1, 1001)));
+
+    // Subcode written for the position reaches the next report.
+    CHECK(command(peer, 0x09, 700) == q(0x46, 700));
+    CHECK(cdblock_drive_disc_subcode(b, 700, held.data()) == 0);
+    CHECK(peer.link_frame() == q_report(0x46, elsewhere));
+    // A subcode provider's Q reaches the reports. It is asked once for a position the drive holds,
+    // and for each sector a read reports.
+    Qs qs;
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_q, &qs) == 0);
+    CHECK(peer.link_frame() == q_report(0x46, provided_q(700)));
+    CHECK(peer.link_frame() == q_report(0x46, provided_q(700)) && qs.calls == 1);
+    CHECK(command(peer, 0x06, 600) == q_report(0x36, provided_q(600)));
+    CHECK(peer.link_frame() == q_report(0x36, provided_q(601)) && qs.calls == 3);
+    // The TOC entries are built from the tracks all the same.
+    const std::vector<uint8_t> r = command(peer, 0x03, 0x010000);
+    CHECK(r[0] == 0x04 && r[1] == 0x41 && r[3] == 0x01 && r[9] == 0x02 && qs.calls == 4);
+    // A closing tray and the board's reset start the drive at the first frame address, where it
+    // asks the provider again: the disc it serves may be another by then.
+    CHECK(command(peer, 0x09, 150) == q_report(0x46, provided_q(150)) && qs.calls == 5);
+    CHECK(cdblock_drive_disc_tray(b, 1) == 0);
+    qs.track = 0x06;
+    CHECK(cdblock_drive_disc_tray(b, 0) == 0);
+    CHECK(peer.link_frame() == q_report(0x46, provided_q(150, 0x06)) && qs.calls == 6);
+    qs.track = 0x07;
+    CHECK(cdblock_reset(b) == 0);
+    sci0(b);
+    CHECK(peer.link_frame() == q_report(0x46, provided_q(150, 0x07)) && qs.calls == 7);
+    // Taking the disc out takes its subcode with it.
+    CHECK(cdblock_drive_disc_subcode_provider(b, nullptr, nullptr) == 0);
+    CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_present(b, 0) == 0);
+    CHECK(cdblock_drive_disc_present(b, 1) == 0 && cdblock_drive_disc_tray(b, 0) == 0);
+    peer.link_frame();
+    CHECK(command(peer, 0x09, 500) == q(0x46, 500));
+    // A provider's nonzero status fails the board at a report too, with no read going.
+    qs.stop = 5;
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_q, &qs) == 0);
+    peer.link_frame();
+    CHECK(peer.failed && contains(b.error(), "subcode provider stopped the run with status 5 at frame address 500"));
 }
 
 void disc_drive_subcode_interrupts()
@@ -1394,7 +1587,7 @@ void disc_drive_landing()
     const auto ring = command(0x02, 300'000);
     CHECK(ring[0] == 0xb6 && (uint32_t(ring[3]) << 16 | uint32_t(ring[4]) << 8 | ring[5]) == 300'000);
     // The landing stops short of frame address 0, and of an unreachable one.
-    CHECK(command(0x06, 2) == report(0x36, 0x41, 0x01, 0, 150, 0));
+    CHECK(command(0x06, 2) == report(0x36, 0x41, 0x01, 0, 149, 0));
     CHECK(cdblock_drive_disc_sector_state(b, 1997, 1, CDBLOCK_SECTOR_UNREACHABLE, 0) == 0);
     CHECK(command(0x06, 2000) == q(0x36, 1998));
     // With no landing the read arrives at its frame address.
@@ -1475,6 +1668,7 @@ const std::vector<Test> drive_tests = {
     {"disc drive ring seek provider", disc_drive_ring_provider},
     {"disc drive sector provider", disc_drive_sector_provider},
     {"disc drive subcode stream", disc_drive_subcode},
+    {"disc drive reports of the disc's Q", disc_drive_q},
     {"disc drive subcode frames and IRQ7", disc_drive_subcode_interrupts},
     {"disc drive speed", disc_drive_speed},
     {"disc drive reset and copy", disc_drive_reset_and_clone},
