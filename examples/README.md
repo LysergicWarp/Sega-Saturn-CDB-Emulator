@@ -45,6 +45,10 @@ turns on with CDB104, CDB106 and YGR022 too. `module-extension.s` and its two mo
 from SH-2 code in an emulated Saturn, with the same images on CDB104, CDB105, CDB106 and YGR022.
 None has run on a console.
 
+The [CD-block SH-1 demo][demo] takes these further in an emulated Saturn: a card firmware with a
+library of modules in the card ROM, three modules, an SH-2 client and discs that run them. Its
+`AD` protocol versions are its own and do not continue the 3 and 4 here.
+
 ## Turning one into card firmware
 
 1. Assemble for big-endian SH-1 and link at `0x0907b000`, where the expansion loader decodes.
@@ -81,6 +85,7 @@ it, as zlib computes it. The SH-2 puts the package with `64` and loads it with `
 Both decompress extensions decode PRS as fuzziqer's compressor writes it, and `prs.py` writes it
 too. Their header comments give the format.
 
+[demo]: https://github.com/LysergicWarp/Sega-Saturn-CDblock-SH1-Demo
 [docs-activation]: https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/extensions.md#card-activation
 [docs-card-checks]: https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/extensions.md#card-checks
 [docs-encoding]: https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/decoder.md#encoding

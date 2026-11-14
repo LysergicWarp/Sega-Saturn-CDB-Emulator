@@ -360,6 +360,12 @@ cdblock_destroy(board);
 - A C program that links `build/libcdblock.a` links the C++ runtime too: `-lstdc++`, or link with
   `g++`.
 
+A working host exists: a
+[fork of Beetle Saturn](https://github.com/LysergicWarp/beetle-saturn-libretro-cd-block-emulator)
+uses the library as its CD block, in
+[`mednafen/ss/cdb_lle.c`](https://github.com/LysergicWarp/beetle-saturn-libretro-cd-block-emulator/blob/cd-block-emulator/mednafen/ss/cdb_lle.c).
+The [CD-block SH-1 demo](https://github.com/LysergicWarp/Sega-Saturn-CDblock-SH1-Demo) runs on it.
+
 `include/cdblock.h` gives each call's arguments, results and refusals. In short:
 
 - A run that starts on a stop returns at once from `cdblock_run`, unless an interrupt is accepted
