@@ -10,13 +10,13 @@ loop needs a profile: on any other dump the disc operations are not supported.
 
 By default the disc has one data track from 00:02:00 with a Saturn header at its first frame
 address. Its tracks, their pregaps, the header's frame address, sectors that are missing or
-unreadable and each sector's R-W subcode can be set. A pregap is the Q of its sectors, which the
-drive reports: without one a track's reports start at index 1. It always holds disc authentication's ring at every check
-position, the sectors that scripts/ring/make.py builds from the dump's own tables. Which positions a
-check reads follows from the ITU4 count when the firmware recognizes the header, so the ring is
-there for any count, as on a pressed disc. The drive answers each authentication seek as Yabause's
-emulation does, with values that pass the seek checks, unless the disc has seek answers of its own:
-failing, passing or scripted, below.
+unreadable and each sector's subcode can be set. A pregap is the Q of its sectors, which the drive
+reports: without one a track's reports start at index 1. It always holds disc authentication's ring
+at every check position, the sectors that scripts/ring/make.py builds from the dump's own tables.
+Which positions a check reads follows from the ITU4 count when the firmware recognizes the header,
+so the ring is there for any count, as on a pressed disc. The drive answers each authentication
+seek as Yabause's emulation does, with values that pass the seek checks, unless the disc has seek
+answers of its own: failing, passing or scripted, below.
 
 None of the drive's behaviour comes from a real drive. Its reports follow what the firmware
 accepts, its seek answers are Yabause's or the disc's own and its timing is the library's defaults
@@ -187,8 +187,11 @@ class Disc:
         return count
 
     def write_subcode(self, frame_address, symbols):
-        """The R-W subcode of the sector at frame_address: its 96 symbols in disc order, R to W in
-        the low six bits of each. A sector without any sends zeros. Before insert, as write."""
+        """The subcode of the sector at frame_address: its 96 symbols in disc order, R to W in the
+        low six bits of each and the Q channel in bit 6. The drive sends each symbol whole, and its
+        position reports carry the Q when the Q's CRC holds. A sector without any sends zeros and
+        reports the Q built from the tracks. A missing or unreadable sector's subcode is sent and
+        reported too. Before insert, as write."""
         symbols = bytes(symbols)
         if len(symbols) != SUBCODE:
             raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
