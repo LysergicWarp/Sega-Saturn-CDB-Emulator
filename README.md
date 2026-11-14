@@ -633,10 +633,17 @@ The tray and the disc:
 - `cdblock_drive_disc_present` takes the disc out or puts one in, and fails while the tray is
   closed. Taking the disc out clears its contents: the tracks, back to the one data track, and the
   sectors, subcode and sector states given. The providers stay with the drive.
-- What the caller gives while the tray is open is the new disc's.
+- What the caller gives after taking the disc out is the new disc's. Given without that, it adds
+  to the disc that is in.
 - Closing on a disc starts the drive as it starts when selected, paused at frame address 150 at
   double speed. Closing on an empty tray reports status `83`, and the drive then obeys only `0c`.
 - The link frames keep their times through an opening and a closing.
+- Every opening is reported in three link frames at the least, where a real tray stays open far
+  longer. A tray closed sooner still reports status `80` in them, obeys no command and starts with
+  the link frame after. For the caller the tray is closed from the call on.
+- `cdblock_drive_disc_state` returns whether the tray is open and whether a disc is in as two
+  bits, as the caller's calls and `0c` left them, or -1 when the drive is not the disc drive.
+- The tray and the disc are the caller's, so these calls work on a failed board too.
 - The tray and the disc stay through the board's reset, an open tray open, and a clone has both.
 - The CDB105 firmware answers status `80` by dropping what it knew of the disc, raising DCHG and
   giving the host status 6, OPEN. After the close it reads the TOC again, or gives the host status
@@ -644,13 +651,25 @@ The tray and the disc:
   ([tray and disc states](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#tray-and-disc-states)).
 - A play the host asks for while the tray is open makes the firmware send `03`, which the open
   drive does not obey. The firmware keeps the request and carries it out on the disc the tray
-  closes on. Without a disc a play makes the firmware send `0c`, which opens the tray here.
+  closes on. By then it has connected the drive to no filter, so that play's sectors reach no
+  partition.
+- While the drive reports no disc, a request the host makes of the drive makes the firmware send
+  `0c`, which opens the tray here: a play (`10`), `11` and `04` without its reset bit among them.
+  The host status goes from 7 to 0 and, with the report of the open tray, to 6.
+  `cdblock_drive_disc_state` shows the tray open, and the caller closes it again. `02` sends the
+  drive nothing.
+- The firmware takes no report from the staging of a drive command of its own until the link frame
+  after the one that carries it
+  ([report handling](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#report-handling)).
+  An opening reported once or twice can fall to that, which is why the drive reports it three
+  times: the firmware then sees a disc changed in one go with one such command on its way. Two of
+  them in quick succession are not tested.
 - Unconfirmed: the reports a real drive sends after its tray closes, their order and how long each
   lasts. A drive has to spin up and look for a disc first, and here the first link frame after the
-  close already reports paused or no disc. Also what a drive obeys with its tray open or without a
-  disc, the bytes after the status in reports `80` and `83` (zeros here), whether a drive with an
-  open tray reports it from its first link frame after a reset, and what `0c` does in a drive whose
-  lid opens by hand.
+  close, or after the opening's three, already reports paused or no disc. Also what a drive obeys
+  with its tray open or without a disc, the bytes after the status in reports `80` and `83` (zeros
+  here), whether a drive with an open tray reports it from its first link frame after a reset, and
+  what `0c` does in a drive whose lid opens by hand.
 
 The landing:
 
@@ -857,7 +876,9 @@ has that name, as on Windows.
 - `package`: `python -m cdblock` on each revision with no card and with each card, sectors put and
   got, the lifecycle and module extensions as source, ELF, plain code and card ROM, the command
   line, the R-W subcode of an audio play through `20` (Get Subcode), the tray opened, closed on
-  another disc and closed on none, and reads that run into the pregap of a track of the other kind.
+  another disc and closed on none, a disc changed in one go, a board booted without a disc or with
+  its tray open, the host's requests in those states, and reads that run into the pregap of a track
+  of the other kind.
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 
