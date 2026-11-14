@@ -38,8 +38,10 @@ _make = _scripts.load("ring", "make", ring=_ring)
 
 SECTOR, DATA, SUBCODE = 2352, 2048, 96
 FIRST = 150             # 00:02:00, the data track's first frame address
+LAST = 449_999          # 99:59:74, the last frame address the drive reaches
 LEAD_OUT = 283_800      # 63:04:00, the latest Sega's disc format standard allows
 DATA_TRACK = 0x41       # the control/ADR byte of a data track: bit 6 data, ADR 1
+DATA_BIT = 0x40
 PREGAP = 150            # two seconds, a pregap's usual length
 # The disc's Saturn header: the identifier, a third-party maker ID without a company code and a
 # product number. Every other field is 00, so the header names no extension.
@@ -51,10 +53,18 @@ RING_ROWS, RING_COLUMNS = 15, 70
 # The host status codes in the low bits of CR1's status byte: the drive paused, its tray open and
 # its tray closed on no disc.
 PAUSE, OPEN, NO_DISC = 1, 6, 7
+# How the drive's log ends a command its open tray or its missing disc refused.
+TRAY_REFUSALS = ("the tray open, not obeyed", "no disc, not obeyed")
 
 
 class NotSupported(RunError):
     pass
+
+
+def _on_disc(frame_address, count=1):
+    """Refuses count frame addresses from frame_address on unless the drive reaches them all."""
+    if not isinstance(frame_address, int) or not 0 <= frame_address <= LAST + 1 - count:
+        raise ValueError(f"frame addresses lie from 0 to {LAST}, not {count} from {frame_address!r} on")
 
 
 def sector(frame_address, mode=1, submode=0, data=b""):
@@ -178,9 +188,10 @@ class Disc:
 
     def write(self, frame_address, data, mode=1, submode=0):
         """Data in sectors from frame_address on, 2048 bytes each, the last padded with zeros.
-        Returns the sectors written, at least one. The drive takes the disc's sectors at insert, so
-        a write after it does not reach the drive."""
+        Returns the sectors written, at least one. The drive takes the disc's sectors as the disc
+        goes in, at insert or change, so a write after it does not reach the drive."""
         count = max(1, -(-len(data) // DATA))
+        _on_disc(frame_address, count)
         for k in range(count):
             self.sectors[frame_address + k] = sector(frame_address + k, mode, submode,
                                                      data[k * DATA:(k + 1) * DATA])
@@ -191,7 +202,10 @@ class Disc:
         low six bits of each and the Q channel in bit 6. The drive sends each symbol whole, and its
         position reports carry the Q when the Q's CRC holds. A sector without any sends zeros and
         reports the Q built from the tracks. A missing or unreadable sector's subcode is sent and
-        reported too. Before insert, as write."""
+        reported too. Before the disc goes in, as write."""
+        _on_disc(frame_address)
+        if isinstance(symbols, int):
+            raise TypeError(f"a sector's subcode is {SUBCODE} symbols, not the number {symbols}")
         symbols = bytes(symbols)
         if len(symbols) != SUBCODE:
             raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
@@ -201,8 +215,10 @@ class Disc:
         """Track number track, the second or a later one, gets a pregap: the frames before its
         start hold a Q that names the track at index 0, with its control/ADR byte and a relative
         time that counts down to zero in the last of them. The drive reports that Q there, and the
-        track at index 1 from its start. The Q takes bit 6 of those sectors' symbols and leaves
-        subcode written there its other bits. Before insert, as write."""
+        track at index 1 from its start. A data track's pregap after an audio track holds the
+        audio track's control/ADR byte up to its last two seconds, as the standard encodes it. The
+        Q takes bit 6 of those sectors' symbols and leaves subcode written there its other bits.
+        Before the disc goes in, as write."""
         if not 2 <= track <= len(self.tracks):
             raise ValueError(f"a pregap goes before track 2 to {len(self.tracks)}, not {track}")
         if not 0 < frames < self.tracks[track - 1][0] - self.tracks[track - 2][0]:
@@ -215,8 +231,11 @@ class Disc:
         merged = dict(self.subcodes)
         for track, frames in self.pregaps.items():
             start, control = self.tracks[track - 1]
+            before = self.tracks[track - 2][1]
+            audio_first = control & DATA_BIT and not before & DATA_BIT
             for frame_address in range(start - frames, start):
-                q = (bytes([control, _make.bcd(track), 0]) + _make.bcd_address(start - 1 - frame_address) + b"\0"
+                held = before if audio_first and start - frame_address > PREGAP else control
+                q = (bytes([held, _make.bcd(track), 0]) + _make.bcd_address(start - 1 - frame_address) + b"\0"
                      + _make.bcd_address(frame_address))
                 written = merged.get(frame_address, bytes(SUBCODE))
                 merged[frame_address] = bytes(symbol & 0xBF | bit for symbol, bit in zip(written, q_symbols(q)))
@@ -224,20 +243,20 @@ class Disc:
 
     def missing(self, frame_address, count=1):
         """count frames from frame_address on hold no sector: the drive passes them with nothing to
-        read. A later missing or unreadable range wins where they overlap. Before insert, as
-        write."""
+        read. A later missing or unreadable range wins where they overlap. Before the disc goes
+        in, as write."""
         self.states.append((frame_address, count, binding.SECTOR_MISSING, 0))
 
     def unreadable(self, frame_address, count, status):
         """count frames from frame_address on hold sectors the decoder delivers with status as its
         decoder status. CDB105 reads 0x01, 0x02 and 0x04 as errors for mode 1, form 1 and form 2
-        sectors, 0x20 for any. Before insert, as write."""
+        sectors, 0x20 for any. Before the disc goes in, as write."""
         self.states.append((frame_address, count, binding.SECTOR_UNREADABLE, status))
 
     def unreachable(self, frame_address, count):
         """count frames from frame_address on are a place the drive never finds: a seek there
         reports seeking until another command, and a read that reaches one loses its place the same
-        way. Before insert, as write."""
+        way. Before the disc goes in, as write."""
         self.states.append((frame_address, count, binding.SECTOR_UNREACHABLE, 0))
 
 
@@ -258,13 +277,17 @@ class Drive:
         if disc and self.disc is None:
             raise RunError(f"{what}: no disc in the drive")
 
-    def _step(self, name, mark, start):
+    def _step(self, name, mark, start, tray=False):
         """The step from log index mark, which fails on a link transfer the SH-1 missed or a
-        command the drive did not obey: the firmware would retry either, hiding a link fault."""
+        command the drive did not obey: the firmware would retry either, hiding a link fault. A
+        step of the tray passes the commands an open tray or a missing disc refused: the SH-1 sends
+        what it was at until it has read the drive's report."""
         board = self.board
         if board.log(binding.LOG_LINK_MISSED, mark):
             raise RunError(f"{name}: the SH-1 missed a transfer of a link frame")
         refused = [e.text for e in board.log(binding.LOG_DRIVE_COMMAND, mark) if e.text.endswith("not obeyed")]
+        if tray:
+            refused = [text for text in refused if not text.endswith(TRAY_REFUSALS)]
         if refused:
             raise RunError(f"{name}: the drive did not obey {refused[0]}")
         sectors = len(board.log(binding.LOG_DRIVE_SECTOR, mark))
@@ -285,12 +308,12 @@ class Drive:
         board.drive_disc_ring_provider(disc.seeks)
         self.disc = disc
 
-    def _status(self, code, name, mark, start):
+    def _status(self, code, name, mark, start, tray=False):
         """The step that ends once the status in CR1 is code, as a Saturn reads it whenever the
         SH-1 idles."""
         board = self.board
         self.host.idle_until(lambda: board.host_response()[0] >> 8 & 0x0F == code, name)
-        return self._step(name, mark, start)
+        return self._step(name, mark, start, tray)
 
     def insert(self, disc):
         """The disc goes into the drive, which starts paused at frame address 150 whatever the
@@ -310,7 +333,7 @@ class Drive:
         board = self.board
         mark, start = board.log_count(), board.instructions
         board.drive_disc_tray(True)
-        return self._status(OPEN, "tray open", mark, start)
+        return self._status(OPEN, "tray open", mark, start, True)
 
     def change(self, disc):
         """With the tray open, disc takes the place of what is in it, None for an empty tray. The
@@ -330,8 +353,8 @@ class Drive:
         mark, start = board.log_count(), board.instructions
         board.drive_disc_tray(False)
         if self.disc is None:
-            return self._status(NO_DISC, "tray closed", mark, start)
-        return self._status(PAUSE, "drive startup", mark, start)
+            return self._status(NO_DISC, "tray closed", mark, start, True)
+        return self._status(PAUSE, "drive startup", mark, start, True)
 
     def authenticate(self, partition):
         """E0 subcode 0, the check reading into partition, then E1. The drive reads the header,

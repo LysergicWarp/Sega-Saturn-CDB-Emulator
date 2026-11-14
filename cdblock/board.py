@@ -355,6 +355,8 @@ class Board:
         """The subcode of the sector at frame_address: its 96 symbols in disc order, R to W in the
         low six bits of each and the Q channel in bit 6. The drive's position reports carry a
         sector's Q when its CRC holds, and one built from the tracks otherwise."""
+        if isinstance(symbols, int):
+            raise TypeError(f"a sector's subcode is {SUBCODE} symbols, not the number {symbols}")
         symbols = bytes(symbols)
         if len(symbols) != SUBCODE:
             raise ValueError(f"a sector's subcode is {SUBCODE} symbols, not {len(symbols)}")
@@ -385,13 +387,20 @@ class Board:
     def drive_disc_tray(self, opened):
         """The disc drive's tray opens or closes. Open, the drive stops where it is, reports status
         80 and obeys no command. Closed on a disc it starts as at power-on, paused at the first
-        frame address, and closed on none it reports status 83."""
+        frame address, and closed on none it reports status 83. An opening is reported in three
+        link frames at the least, which a tray closed sooner still sends before it starts."""
         self._ok(self.lib.cdblock_drive_disc_tray(self.handle, 1 if opened else 0))
 
     def drive_disc_present(self, present):
         """The disc goes into the open tray or comes out of it. Taking it out clears its contents:
         the tracks, sectors, subcode and sector states given. The providers stay with the drive."""
         self._ok(self.lib.cdblock_drive_disc_present(self.handle, 1 if present else 0))
+
+    def drive_disc_state(self):
+        """Whether the disc drive's tray is open and whether a disc is in it, as these calls and
+        drive command 0c left them."""
+        state = self._ok(self.lib.cdblock_drive_disc_state(self.handle))
+        return bool(state & b.DISC_TRAY_OPEN), bool(state & b.DISC_PRESENT)
 
     def _provider_callback(self, answer):
         """answer(frame_address, out) as the library calls a provider. An exception from it fails

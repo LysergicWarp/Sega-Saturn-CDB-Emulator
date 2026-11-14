@@ -12,6 +12,7 @@ TEST_LOW, PC0_HIGH, PROBE_MIRROR, DEVICE_TIMING, CLOCK = 0x1, 0x2, 0x4, 0x8, 0x1
 CARD_PERIOD, FIFO_WORDS = 64, 6
 DRIVE_SILENT, DRIVE_FED, DRIVE_DISC = 0, 1, 2
 SECTOR_PRESENT, SECTOR_MISSING, SECTOR_UNREADABLE, SECTOR_UNREACHABLE = 0, 1, 2, 3
+DISC_TRAY_OPEN, DISC_PRESENT = 1, 2
 CARD_VIDEO, CARD_AUDIO = 0, 1
 (LOG_HOST_FLAGS, LOG_PORT_WRITE, LOG_LINK_SENT, LOG_LINK_MISSED, LOG_CARD_VIDEO, LOG_CARD_AUDIO,
  LOG_CARD_WRITE, LOG_INTERRUPT, LOG_EXCEPTION, LOG_VIOLATION, LOG_READ, LOG_WRITE,
@@ -122,6 +123,7 @@ FUNCTIONS = [
     ("cdblock_drive_disc_subcode_provider", c_int, [Board, SubcodeProvider, ctypes.c_void_p]),
     ("cdblock_drive_disc_tray", c_int, [Board, c_int]),
     ("cdblock_drive_disc_present", c_int, [Board, c_int]),
+    ("cdblock_drive_disc_state", c_int, [Board]),
     ("cdblock_card_request", c_int, [Board, c_int, ctypes.c_uint]),
     ("cdblock_card_interrupt", c_int, [Board, c_int]),
     ("cdblock_card_push_status", c_int, [Board, u16]),

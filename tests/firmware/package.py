@@ -17,17 +17,28 @@ known revision: strict, the clock skipping on at the profile's idle loop.
 - The drive's sector provider in Python on CDB105: what it leaves or replaces reaches the host, and
   its exceptions come back from the run on the board that ran it, its copy's too.
 - The drive's subcode on CDB105: an audio play with 04's R-W setting on, where 20 returns each pack
-  the disc holds once, in order and without an error flag, until the pause ends them.
+  the disc holds once, in order and without an error flag, until the pause ends them. The disc's
+  symbols have bits 6 and 7 set, which the firmware drops. The disc refuses subcode that is not 96
+  symbols, a number in their place and a frame address the drive does not reach.
 - The drive's subcode provider in Python on CDB105, as the sector provider: what it leaves or
   replaces reaches the host as packs, and its exceptions come back from the run on the board that
-  ran it.
+  ran it. Neither provider sees what the disc was given after it went in.
 - The drive's tray on CDB105: an opening gives the host status open with DCHG, a closing on another
-  disc that disc's TOC through 02 and its sectors, 05 opens the tray through drive command 0c, and a
-  closing on an empty tray gives the status no disc.
+  disc that disc's TOC through 02 and its sectors and none of the first disc's, 05 opens the tray
+  through drive command 0c, and a closing on an empty tray gives the status no disc. An opening
+  while the SH-1 still sends a seek passes. A disc changed with no link frame between the opening
+  and the closing is seen as any other.
+- The tray at boot and the host's requests on CDB105: a board booted without a disc gives the
+  status no disc, where 02 sends the drive nothing and a play sends 0c, which opens the tray. A
+  play asked for while the tray is open sends 03, which the drive refuses, and is carried out on
+  the disc the tray closes on, with the drive connected to no filter. A board booted with its tray
+  open gives the status open.
 - Pregaps on CDB105: a read through 10 that runs from the data track into an audio track's pregap
   gives the host the data track's sectors, and the firmware plays on from the audio track's index 1.
   A play that runs from the audio track into a data track's pregap is read on from the frame before
-  that track's start at double speed, and the host gets the data track's sectors.
+  that track's start at double speed, and the host gets the data track's sectors. The disc's
+  pregaps: the Q they hold, a long one before a data track, one merged with written subcode and
+  the lengths and tracks refused.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -41,9 +52,9 @@ import pathlib
 from cdblock import __main__ as cli
 from cdblock import binding, strict
 from cdblock import extension as extensions
-from cdblock.disc import (DATA, DATA_TRACK, FIRST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SUBCODE, Disc, Drive,
-                          sector)
-from cdblock.host import DCHG, DRDY, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
+from cdblock.disc import (DATA, DATA_TRACK, FIRST, LAST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SUBCODE, Disc,
+                          Drive, q_symbols, sector)
+from cdblock.host import DCHG, DRDY, ESEL, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
 
 from . import rw
 from .common import PROFILES, ROMS, EmulatorError, Suite, board
@@ -302,6 +313,10 @@ def check_sector_provider(suite, dumps):
         drive = Drive(host)
         drive.insert(disc)
         case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+        # The drive took the disc's sectors as the disc went in: a write after that does not reach
+        # it.
+        held = disc.sectors[PROVIDED_FRAME_ADDRESS]
+        disc.write(PROVIDED_FRAME_ADDRESS, REPLACED)
 
         # A copy takes no provider from a drive selected since.
         plain = bd.clone()
@@ -311,8 +326,7 @@ def check_sector_provider(suite, dumps):
         seen = {}
         left = provided(lambda frame_address, raw: seen.update({frame_address: raw}))
         case.check(read_provided(left, disc, idle) == WRITTEN, "a sector left alone differs from the disc's")
-        case.check(seen.get(PROVIDED_FRAME_ADDRESS) == disc.sectors[PROVIDED_FRAME_ADDRESS],
-                   "the provider saw another sector")
+        case.check(seen.get(PROVIDED_FRAME_ADDRESS) == held, "the provider saw another sector")
         case.info["frame_addresses"] = sorted(seen)
 
         def replace(frame_address, raw):
@@ -443,17 +457,42 @@ def check_packs(case, what, packs, sectors, shift=0):
                f"{[rw.number(symbols) for _, symbols in packs]}")
 
 
+def refuses(case, call, error, text, what):
+    """call raises error with text in its message. what names the call in a failure."""
+    try:
+        call()
+        case.check(False, f"{what}: taken")
+    except error as raised:
+        case.check(text in str(raised), f"{what}: raised {raised}")
+
+
 def check_subcode(suite, dumps):
     """An audio play with 04's R-W setting on. The firmware locks on to the drive's subcode frames
     and decodes the packs, and the host asks for them with 20 once a sector period. After the play
-    the drive pauses, which ends the frames: the decoded packs still come, then none."""
+    the drive pauses, which ends the frames: the decoded packs still come, then none. The disc's
+    symbols have bits 6 and 7 set, the Q and P channels, and the packs come without them. First
+    what the disc refuses: subcode that is not 96 symbols, a number in their place, and a frame
+    address the drive does not reach, for subcode and for a sector's data."""
     case = suite.case("cdb105 subcode")
     bd, host, disc = subcode_board(dumps.rom("cdb105"))
-    try:
-        disc.write_subcode(PLAY_FRAME_ADDRESS, b"short")
-        case.check(False, "the disc took subcode of the wrong length")
-    except ValueError as error:
-        case.check("96 symbols" in str(error), f"raised {error}")
+    for symbols in (b"", bytes(SUBCODE - 1), bytes(SUBCODE + 1)):
+        refuses(case, lambda: disc.write_subcode(PLAY_FRAME_ADDRESS, symbols), ValueError, "96 symbols",
+                f"subcode of {len(symbols)} symbols")
+    refuses(case, lambda: disc.write_subcode(PLAY_FRAME_ADDRESS, SUBCODE), TypeError, "not the number",
+            "a number as the disc's subcode")
+    refuses(case, lambda: bd.drive_disc_subcode(PLAY_FRAME_ADDRESS, SUBCODE), TypeError, "not the number",
+            "a number as the board's subcode")
+    for frame_address in (-1, LAST + 1, 1 << 32, str(PLAY_FRAME_ADDRESS)):
+        refuses(case, lambda: disc.write_subcode(frame_address, bytes(SUBCODE)), ValueError, "frame addresses",
+                f"subcode at frame address {frame_address!r}")
+        refuses(case, lambda: disc.write(frame_address, b""), ValueError, "frame addresses",
+                f"a sector at frame address {frame_address!r}")
+    refuses(case, lambda: disc.write(LAST, bytes(DATA + 1)), ValueError, "frame addresses",
+            "two sectors from the last frame address")
+    case.equal(disc.write(LAST, b""), 1, "sectors written at the last frame address")
+    disc.write_subcode(LAST, bytes(SUBCODE))
+    for frame_address, symbols in list(disc.subcodes.items()):
+        disc.write_subcode(frame_address, bytes(symbol | 0xC0 for symbol in symbols))
     try:
         host.boot()
         insert_subcode(host, disc)
@@ -497,6 +536,10 @@ def check_subcode_provider(suite, dumps):
         bd.drive_select_disc()
         bd.drive_disc_subcode_provider(stop)
         insert_subcode(host, disc)
+        # The drive took the disc's subcode as the disc went in: subcode written after that does
+        # not reach it.
+        held = dict(disc.subcodes)
+        disc.write_subcode(PLAY_FRAME_ADDRESS, rw.sector(PROVIDED_SHIFT))
 
         # A copy takes no provider from a drive selected since.
         plain = bd.clone()
@@ -506,10 +549,13 @@ def check_subcode_provider(suite, dumps):
         seen = {}
         left = provided(lambda frame_address, symbols: seen.update({frame_address: symbols}))
         check_packs(case, "subcode left alone", played(left), PROVIDED_SECTORS)
-        # The drive asks for the sector at each position it reports too, where this disc holds none.
-        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == disc.subcodes.get(frame_address, bytes(SUBCODE))
+        # The drive asks for the sector at each position it reports too, where this disc holds none
+        # and the provider sees zeros.
+        case.check(PLAY_FRAME_ADDRESS in seen and all(symbols == held.get(frame_address, bytes(SUBCODE))
                                                       for frame_address, symbols in seen.items()),
-                   "the provider saw other subcode than the disc's")
+                   "the provider saw other subcode than the disc went in with")
+        case.check(any(frame_address not in held for frame_address in seen),
+                   "the provider saw no sector without subcode")
         case.info["frame_addresses"] = sorted(seen)
 
         def replace(frame_address, symbols):
@@ -566,8 +612,12 @@ def toc(tracks, lead_out):
 
 def check_tray(suite, dumps):
     """A disc in the drive, then its tray opened, closed on a second disc, opened by the host with
-    05, closed on nothing and at last closed on the first disc again. The step of each opening and
-    closing ends on the host status it names, so a status that never comes fails the case."""
+    05, closed on nothing and closed on the first disc again. The step of each opening and closing
+    ends on the host status it names, so a status that never comes fails the case. The first
+    opening comes while the SH-1 still sends its seek back from the disc check, which the open tray
+    refuses. The first disc holds a sector the second does not, which must not stay in the drive.
+    At last the disc changes in one go, the tray opened and closed with no link frame between: the
+    drive reports the opening three times all the same."""
     case = suite.case("cdb105 tray and disc change")
     image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
     bd = board(image, flags=HARNESS_FLAGS)
@@ -576,11 +626,16 @@ def check_tray(suite, dumps):
     drive = Drive(host)
     first, second = Disc(image, header=None), Disc(image, header=None, tracks=CHANGED_TRACKS,
                                                    lead_out=CHANGED_LEAD_OUT)
-    first.write(PROVIDED_FRAME_ADDRESS, WRITTEN)
+    first.write(PROVIDED_FRAME_ADDRESS, WRITTEN + WRITTEN)
     second.write(PROVIDED_FRAME_ADDRESS, REPLACED)
+
+    def status():
+        return bd.host_response()[0] >> 8 & 0x0F
+
     try:
         host.boot()
         drive.insert(first)
+        case.equal(bd.drive_disc_state(), (False, True), "the tray open and a disc in, after insert")
         case.check(get_toc(host) == toc(first.tracks, LEAD_OUT), "the first disc's TOC differs")
         try:
             drive.change(second)
@@ -589,33 +644,154 @@ def check_tray(suite, dumps):
             case.check("the tray is closed" in str(error), f"raised {error}")
         case.check(drive.disc is first, "a refused change took the disc")
 
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result on the first disc")
+        mark = bd.log_count()
         step = drive.open_tray()
+        case.check(any(e.text.endswith("the tray open, not obeyed") for e in bd.log(binding.LOG_DRIVE_COMMAND, mark)),
+                   "the open tray refused no command of the SH-1's")
         case.check(step.flags & DCHG, "the opening set no DCHG")
         case.equal(bd.host_response()[1:], [0xFFFF] * 3, "the position of an open tray")
+        case.equal(bd.drive_disc_state(), (True, True), "the tray open and a disc in, after the opening")
         drive.change(second)
         drive.close_tray()
         case.check(get_toc(host) == toc(CHANGED_TRACKS, CHANGED_LEAD_OUT), "the second disc's TOC differs")
         case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
-        case.check(read_provided(bd, second, profile.IDLE) == REPLACED, "the second disc's sector did not arrive")
+        drive.read_sectors(0, PROVIDED_FRAME_ADDRESS, 2)
+        got = b"".join(word.to_bytes(2, "big") for word in host.get(0, 0, 2, DATA))
+        case.check(got == REPLACED + bytes(DATA), "not the second disc's sector and one it does not hold")
 
         mark = bd.log_count()
         host.command([0x0500, 0, 0, 0], name="05 open tray")
-        host.idle_until(lambda: bd.host_response()[0] >> 8 & 0x0F == OPEN, "05 open tray")
+        host.idle_until(lambda: status() == OPEN, "05 open tray")
         case.equal([e.text[:2] for e in bd.log(binding.LOG_DRIVE_COMMAND, mark)], ["0c"], "the drive commands of 05")
+        case.equal(bd.drive_disc_state(), (True, True), "the tray open and a disc in, after 05")
         drive.change(None)
+        case.equal(bd.drive_disc_state(), (True, False), "the tray open and a disc in, the disc taken out")
         drive.close_tray()
-        case.equal(bd.host_response()[0] >> 8 & 0x0F, NO_DISC, "the status of an empty tray")
+        case.equal(status(), NO_DISC, "the status of an empty tray")
         case.equal(bd.host_response()[1:], [0xFFFF] * 3, "the position of an empty tray")
+        case.equal(bd.drive_disc_state(), (False, False), "the tray open and a disc in, closed on nothing")
 
         drive.open_tray()
         drive.change(first)
         drive.close_tray()
         case.check(get_toc(host) == toc(first.tracks, LEAD_OUT), "the first disc's TOC differs after the changes")
+
+        # The SH-1 takes no report while its seek back from the check is still to go out, which a
+        # single report of the opening would fall to.
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result before the change in one go")
+        bd.host_clear_flags(0xFFFF & ~DCHG)
+        mark = bd.log_count()
+        bd.drive_disc_tray(True)
+        drive.change(second)
+        bd.drive_disc_tray(False)
+        case.equal(bd.drive_disc_state(), (False, True), "the tray open and a disc in, changed in one go")
+        idle_for(host, 75 * SECTOR_CYCLES, "a change in one go")
+        case.equal([e.value for e in bd.log(binding.LOG_DRIVE_REPORT, mark)].count(0x80), 3,
+                   "reports of the open tray for a change in one go")
+        case.check(bd.host_flags() & DCHG, "the change in one go set no DCHG")
+        case.equal(status(), PAUSE, "the status a second after a change in one go")
+        case.check(get_toc(host) == toc(CHANGED_TRACKS, CHANGED_LEAD_OUT),
+                   "the second disc's TOC differs after the change in one go")
         case.info["steps"] = [f"{s.name}: {s.instructions}" for s in host.steps]
     except (RunError, EmulatorError) as error:
         case.check(False, f"failed: {error!r}")
     case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
     bd.close()
+
+
+def check_tray_requests(suite, dumps):
+    """A board booted with its tray closed on nothing: the host status is no disc, 02 sends the
+    drive nothing, and a play makes the firmware send drive command 0c, which opens the tray. The
+    caller sees that in the drive's state, puts a disc in and closes it. Then a play asked for
+    while the tray is open: the firmware sends 03, which the open drive refuses, and carries the
+    play out on the disc the tray closes on. The drive is connected to no filter by then, so the
+    play's sectors reach no partition. At last a board booted with its tray open."""
+    case = suite.case("cdb105 tray at boot and drive requests")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    disc = Disc(image, header=None)
+    disc.write(PROVIDED_FRAME_ADDRESS, WRITTEN)
+    play = [0x1080 | PROVIDED_FRAME_ADDRESS >> 16, PROVIDED_FRAME_ADDRESS & 0xFFFF, 0x0080, 1]
+    boards = []
+
+    def booted(opened):
+        """A board whose drive has its tray open, or closed on nothing, from before its boot."""
+        bd = board(image, flags=HARNESS_FLAGS)
+        boards.append(bd)
+        strict.apply(bd, profile, None)
+        bd.drive_select_disc()
+        bd.drive_disc_tray(True)
+        if not opened:
+            bd.drive_disc_present(False)
+            bd.drive_disc_tray(False)
+        host = Host(bd, idle=profile.IDLE)
+        host.boot()
+        return bd, host, lambda: bd.host_response()[0] >> 8 & 0x0F
+
+    def sent(bd, mark):
+        return [e.text for e in bd.log(binding.LOG_DRIVE_COMMAND, mark)]
+
+    try:
+        bd, host, status = booted(False)
+        drive = Drive(host)
+        host.idle_until(lambda: status() == NO_DISC, "the boot without a disc")
+        case.equal(bd.drive_disc_state(), (False, False), "the tray open and a disc in, booted without a disc")
+        mark = bd.log_count()
+        get_toc(host)
+        idle_for(host, 20 * SECTOR_CYCLES, "after 02 without a disc")
+        case.equal(sent(bd, mark), [], "the drive commands of 02 without a disc")
+        case.equal(status(), NO_DISC, "the status after 02 without a disc")
+        host.command(play, name="10 play")
+        host.idle_until(lambda: status() == OPEN, "the play without a disc")
+        case.equal([text[:2] for text in sent(bd, mark)], ["0c"], "the drive commands of a play without a disc")
+        case.equal(bd.drive_disc_state(), (True, False), "the tray open and a disc in, after that play")
+        drive.change(disc)
+        drive.close_tray()
+        case.check(get_toc(host) == toc(disc.tracks, LEAD_OUT), "the TOC of the disc put in differs")
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+
+        drive.open_tray()
+        host.command([0x3000, 0, 0, 0], ESEL, "30 connect drive")
+        bd.host_clear_flags(0xFFFF & ~PEND)
+        mark = bd.log_count()
+        host.command(play, name="10 play")
+        idle_for(host, 20 * SECTOR_CYCLES, "the play asked of an open tray")
+        refused = sent(bd, mark)
+        case.check(refused and all(text.startswith("03") and text.endswith("the tray open, not obeyed")
+                                   for text in refused), f"the drive commands of a play asked of an open tray: {refused}")
+        case.check(not bd.host_flags() & PEND, "the play ended while the tray was open")
+        mark = bd.log_count()
+        drive.close_tray()
+        host.wait_for(PEND, "the play kept through the open tray")
+        # The TOC, the seek to the first frame address, then the play and the pause at its end.
+        case.equal([text[:2] for text in sent(bd, mark)], ["03", "09", "06", "08"],
+                   "the drive commands after the closing")
+        # The firmware connects the drive to no filter after the closing, so the play's sectors
+        # reach no partition.
+        case.equal(host.command([0x3200, 0, 0, 0], name="32 get connection")[2] >> 8, 0xFF,
+                   "the filter the drive is connected to after the closing")
+        case.equal(host.command([0x5100, 0, 0, 0], name="51 get sector number")[3], 0,
+                   "sectors of the kept play in the partition")
+        case.info["steps"] = [f"{s.name}: {s.instructions}" for s in host.steps]
+
+        bd, host, status = booted(True)
+        host.idle_until(lambda: status() == OPEN, "the boot with the tray open")
+        case.equal(bd.drive_disc_state(), (True, True), "the tray open and a disc in, booted with the tray open")
+        case.equal(sent(bd, 0), [], "the drive commands of a boot with the tray open")
+        bd.drive_disc_tray(False)
+        host.idle_until(lambda: status() == PAUSE, "the closing after a boot with the tray open")
+        case.check(get_toc(host) == toc(((FIRST, DATA_TRACK),), LEAD_OUT), "the TOC after that closing differs")
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error!r}")
+    for each in boards:
+        case.equal(len(each.log(binding.LOG_VIOLATION)), 0, "violations")
+        each.close()
+
+
+def q_bytes(symbols):
+    """The ten bytes of the Q in bit 6 of a sector's symbols, without its CRC."""
+    return bytes(sum((symbol >> 6 & 1) << (7 - bit) for bit, symbol in enumerate(symbols[k * 8:k * 8 + 8]))
+                 for k in range(10))
 
 
 def check_pregap(suite, dumps):
@@ -639,17 +815,35 @@ def check_pregap(suite, dumps):
     after = b"".join(f"sector {LATER_DATA_START + k}".encode().ljust(DATA, b"\0") for k in range(PREGAP_AFTER))
     disc.write(into_audio, before)
     disc.write(LATER_DATA_START, after)
-    try:
-        disc.pregap(1)
-        case.check(False, "the first track took a pregap")
-    except ValueError as error:
-        case.check("track 2" in str(error), f"raised {error}")
+    # A Q of ADR 2, a catalogue number, in the first read's way. The firmware takes a position
+    # from a Q of ADR 1 alone, so the read goes as without it.
+    disc.write_subcode(into_audio + 3, q_symbols(bytes.fromhex("42123456789012300052")))
+    refuses(case, lambda: disc.pregap(1), ValueError, "track 2", "a pregap of the first track")
+    refuses(case, lambda: disc.pregap(4), ValueError, "track 2", "a pregap of a track the disc has not")
+    refuses(case, lambda: disc.pregap(2, 0), ValueError, "does not fit", "a pregap of no frames")
+    refuses(case, lambda: disc.pregap(2, AUDIO_START - FIRST), ValueError, "does not fit",
+            "a pregap as long as the track before it")
+    refuses(case, lambda: q_symbols(bytes(9)), ValueError, "ten bytes", "a Q of nine bytes")
     disc.pregap(2)
     disc.pregap(3)
-    q = bytes(sum((symbol >> 6 & 1) << (7 - bit) for bit, symbol in enumerate(disc.subcode()[frame][k * 8:k * 8 + 8]))
-              for frame in (AUDIO_START - PREGAP, AUDIO_START - 1) for k in range(10))
+    q = b"".join(q_bytes(disc.subcode()[frame]) for frame in (AUDIO_START - PREGAP, AUDIO_START - 1))
     case.equal(q.hex(" "), "01 02 00 00 01 74 00 04 24 50 01 02 00 00 00 00 00 04 26 49",
                "the Q of the audio track's pregap, its first and last frame")
+    # Pregaps of three seconds. The data track's holds the audio track's control/ADR byte up to its
+    # last two seconds, the audio track's its own throughout. The Q takes bit 6 alone of subcode
+    # written there.
+    longer = Disc(image, header=None, tracks=disc.tracks)
+    longer.write_subcode(LATER_DATA_START - 1, bytes([0xBF]) * SUBCODE)
+    longer.pregap(2, PREGAP + 75)
+    longer.pregap(3, PREGAP + 75)
+    held = longer.subcode()
+    case.equal([q_bytes(held[start - before])[:3].hex() for start in (LATER_DATA_START, AUDIO_START)
+                for before in (PREGAP + 75, PREGAP + 1, PREGAP, 1)],
+               ["010300", "010300", "410300", "410300"] + ["010200"] * 4,
+               "the control/ADR byte, track and index through the pregaps of three seconds")
+    merged = held[LATER_DATA_START - 1]
+    case.check(all(symbol | 0x40 == 0xFF for symbol in merged) and merged == bytes(
+        symbol | 0xBF for symbol in q_symbols(q_bytes(merged))), "the pregap's Q changed other bits of written subcode")
 
     def crossed(partition, first, play, control, track, sectors, data, what):
         """A read of count sectors from first into partition, which the firmware takes up again
@@ -674,7 +868,10 @@ def check_pregap(suite, dumps):
         host.boot()
         drive.insert(disc)
         case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+        mark = bd.log_count()
         crossed(0, into_audio, [AUDIO_START, 1, 2, 1], AUDIO_TRACK, 2, PREGAP_BEFORE, before, "into the audio track")
+        case.check(any(e.text.startswith("36 42 12 34 56 78 90 12 30 00 52")
+                       for e in bd.log(binding.LOG_DRIVE_REPORT, mark)), "no report carried the Q of ADR 2")
         crossed(1, into_data, [LATER_DATA_START - 1, 0, 0, 2], DATA_TRACK, 3, PREGAP_AFTER, after,
                 "into the data track")
         case.info["steps"] = [f"{s.name}: {s.instructions}" for s in host.steps]
@@ -772,12 +969,13 @@ def run(context):
         check_subcode(suite, dumps)
         check_subcode_provider(suite, dumps)
         check_tray(suite, dumps)
+        check_tray_requests(suite, dumps)
         check_pregap(suite, dumps)
     else:
         suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray and the pregap: "
                    "need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 62)
+        suite.pin("cases", len(suite.cases), 63)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:
