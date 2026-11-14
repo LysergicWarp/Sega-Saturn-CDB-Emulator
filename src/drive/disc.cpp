@@ -127,8 +127,17 @@ void DiscDrive::start()
     toc_entry = 0;
     seeking = backward = false;
     seek_until = subcode_at = 0;
+    unreported = 0;
+    closing = false;
     // The disc may be another one, or its provider serve another, since the sector was taken.
     taken = false;
+}
+
+void DiscDrive::open_tray()
+{
+    halt(Mode::Open);
+    unreported = open_reports;
+    closing = false;
 }
 
 void DiscDrive::reset(uint64_t now)
@@ -149,12 +158,26 @@ void DiscDrive::set_tray(bool open)
         return;
     // The link frames go on at their times either way. A real drive spins up and looks for a disc
     // after its tray closes, and what it reports until it has found one or given up is not known.
-    // Here the next link frame already reports paused at the first frame address, or no disc:
-    // both unconfirmed.
-    if (open)
-        halt(Mode::Open);
+    // Here the next link frame, or the one after the opening's three, already reports paused at
+    // the first frame address, or no disc: both unconfirmed.
+    if (!open)
+    {
+        // The SH-1 learns of an opening from the reports alone, so a tray closed before the drive
+        // has reported it open closes after those reports.
+        if (unreported)
+            closing = true;
+        else
+            start();
+    }
+    else if (closing)
+    {
+        // Opened again before those reports: the tray stays open.
+        closing = false;
+    }
     else
-        start();
+    {
+        open_tray();
+    }
 }
 
 void DiscDrive::set_disc(bool in)
@@ -197,6 +220,9 @@ void DiscDrive::act(DrivePort &port)
 
 void DiscDrive::tick(DrivePort &port, uint64_t now)
 {
+    // A tray closed before the drive had reported it open: the link frames have, so it closes.
+    if (closing && !unreported)
+        start();
     // A seek arrives with no other motion in that period, unless the drive never finds its frame
     // address.
     if (seeking)
@@ -330,6 +356,8 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
         // Both with zeros after the status, unconfirmed.
         case Mode::Open:
             b[report_status] = tray_open;
+            if (unreported)
+                --unreported;
             break;
         case Mode::Empty:
             b[report_status] = no_disc;
@@ -417,7 +445,7 @@ void DiscDrive::obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_
         backward = command == cmd_scan_backward;
         break;
     case cmd_open_tray:
-        halt(Mode::Open);
+        open_tray();
         break;
     default:
         throw std::runtime_error("the drive does not know command " + text(bytes.data(), 1) + ": " +

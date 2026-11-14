@@ -603,6 +603,14 @@ int cdblock_drive_disc_present(cdblock_board *b, int present)
     return 0;
 }
 
+int cdblock_drive_disc_state(cdblock_board *b)
+{
+    auto *disc = dynamic_cast<cdblock::DiscDrive *>(&b->board->drive());
+    if (!disc)
+        return fail(b, "the drive is not the disc drive");
+    return (disc->tray_opened() ? CDBLOCK_DISC_TRAY_OPEN : 0) | (disc->disc_present() ? CDBLOCK_DISC_PRESENT : 0);
+}
+
 int cdblock_drive_feed_link_frame(cdblock_board *b, const uint8_t link_frame[13])
 {
     if (failed(b))

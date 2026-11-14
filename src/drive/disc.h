@@ -23,12 +23,15 @@
 // obeys nothing until the tray closes. Closing with a disc starts the drive as at power-on, paused
 // at the first frame address at double speed, which makes the firmware read the TOC. Closing
 // without one reports no disc, and the drive then obeys only command 0c. The link frames keep
-// their times through both, and the board's reset moves neither the tray nor the disc.
+// their times through both, and the board's reset moves neither the tray nor the disc. Every
+// opening is reported in three link frames at the least: a tray closed before that reports open
+// in them all the same and starts with the link frame after, so the firmware sees a disc changed
+// in one go while one drive command of its own is on its way out.
 // Unconfirmed: the reports of a real drive after its tray closes, their order and how long each
 // lasts, as a drive has to spin up and look for a disc before it can report either. Here the
-// first link frame after the close already does. Also what a drive without a disc obeys, the
-// bytes after the status in the open tray and no disc reports, and whether a real drive whose
-// tray is open reports it from its first link frame after a reset.
+// first link frame after the close, or after the opening's three, already does. Also what a
+// drive without a disc obeys, the bytes after the status in the open tray and no disc reports,
+// and whether a real drive whose tray is open reports it from its first link frame after a reset.
 //
 // The reports follow what the firmware accepts, the ring seek answers are Yabause's unless the
 // caller's provider gives others, providers can serve the disc's sectors and subcode, and the
@@ -208,12 +211,19 @@ class DiscDrive final : public Drive
         return at;
     }
     void act(DrivePort &port) override;
+    // Whether the tray is open, as the caller left it or command 0c did.
     bool tray_opened() const
     {
-        return mode == Mode::Open;
+        return mode == Mode::Open && !closing;
+    }
+    bool disc_present() const
+    {
+        return present;
     }
     // Opens or closes the tray. Opening stops the drive where it is. Closing starts it as at
-    // power-on, or reporting no disc without one. The link frames keep their times.
+    // power-on, or reporting no disc without one. The link frames keep their times. An opening is
+    // reported in three link frames at the least: a tray closed before that still reports open
+    // and obeys nothing in them, and starts with the link frame after.
     void set_tray(bool open);
     // Puts the disc in or takes it out, through an open tray. Taking it out clears its tracks,
     // sectors, subcode and sector states. The providers stay with the drive.
@@ -261,6 +271,10 @@ class DiscDrive final : public Drive
   private:
     // A subcode block's frames: 96 symbols, then two sync frames.
     static constexpr unsigned block_frames = 98;
+    // The link frames that report an opening at the least. The CDB105 firmware takes no report
+    // from staging a command of its own to the link frame after the one that carries it, which
+    // can pass two reports by.
+    static constexpr unsigned open_reports = 3;
     enum class Mode
     {
         Toc,
@@ -288,6 +302,10 @@ class DiscDrive final : public Drive
     // Whether a disc is in. The tray is open in Mode::Open, and closed without a disc in
     // Mode::Empty.
     bool present = true;
+    // The link frames that still have to report an opening, and a tray the caller closed before
+    // they did: the drive stays in Mode::Open until they have gone out.
+    unsigned unreported = 0;
+    bool closing = false;
     RingProvider ring_provider;
     SectorProvider sector_provider;
     SubcodeProvider subcode_provider;
@@ -316,6 +334,8 @@ class DiscDrive final : public Drive
     // The state a closed tray starts in: paused at the first frame address at double speed, or
     // without a disc reporting none.
     void start();
+    // Stops the drive where it is with its tray open, the opening still to report.
+    void open_tray();
     void tick(DrivePort &port, uint64_t now);
     std::array<uint8_t, link_frame_size> report();
     void obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_t now);

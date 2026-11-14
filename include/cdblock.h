@@ -3,16 +3,17 @@
  *
  * The board runs any CD-block ROM dump. Devices act only when the caller raises their events, unless
  * device timing or the clock is on, and the CPU runs until a stop address, a write stop,
- * an instruction budget or a SLEEP with nothing to accept. Functions returning int give 0 or a
- * count on success and -1 on failure, with the reason in cdblock_last_error. cdblock_run,
- * cdblock_run_from_stop and cdblock_step give an exit reason instead: on failure
- * CDBLOCK_EXIT_ERROR, which is 0, with the reason in the same place.
+ * an instruction budget or a SLEEP with nothing to accept. Functions returning int give 0, a
+ * count or, for cdblock_drive_disc_state, bits on success and -1 on failure, with the reason in
+ * cdblock_last_error. cdblock_run, cdblock_run_from_stop and cdblock_step give an exit reason
+ * instead: on failure CDBLOCK_EXIT_ERROR, which is 0, with the reason in the same place.
  *
  * An error the board cannot go on from (a failed check, an unknown drive command, or a nonzero
  * return from a ring or sector provider) fails the board, which then needs a reset. Until then
  * runs, clock advances, bus accesses and device events (host, decoder, drive, card, timer, TEST
  * pad and serial line) fail. Peeks, pokes, queries such as the CPU state, the host flags, the FIFO,
- * the clock or the log, cdblock_card_memory and the board's setup still work.
+ * the clock or the log, cdblock_card_memory, the board's setup and the disc drive's tray and disc
+ * still work.
  */
 #ifndef CDBLOCK_H
 #define CDBLOCK_H
@@ -385,21 +386,37 @@ CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdb
  * - cdblock_drive_disc_present puts the disc in, present nonzero, or takes it out. It fails while
  *   the tray is closed. Taking the disc out clears its contents: the tracks, back to the one data
  *   track, and the sectors, subcode and sector states given. The providers stay with the drive.
- * - The contents given while the tray is open are the new disc's. Those calls work with the tray
- *   closed too.
+ * - The contents given after the disc is taken out are the new disc's. Without that they add to
+ *   the disc that is in. Those calls work with the tray closed too.
  * - Closing with a disc starts the drive as at power-on, paused at the first frame address at
  *   double speed, which makes the firmware read the TOC. Closing without one reports status 83,
  *   and the drive then obeys only command 0c.
  * - The link frames keep their times through an opening and a closing.
+ * - Every opening is reported in three link frames at the least, where a real tray stays open
+ *   far longer. A tray closed sooner still reports status 80 in them, obeys no command and starts
+ *   with the link frame after. The CDB105 firmware takes no report while a drive command of its
+ *   own is on its way out, which passes up to two reports by, so it sees a disc changed in one go
+ *   with one such command on its way. Two of them in quick succession are not tested. For the
+ *   caller the tray is closed from the call on.
+ * - cdblock_drive_disc_state returns the tray and the disc as bits, CDBLOCK_DISC_TRAY_OPEN and
+ *   CDBLOCK_DISC_PRESENT, as the caller's calls and command 0c left them. It returns -1 when the
+ *   drive is not the disc drive, so check for that before testing a bit.
+ * - The CDB105 firmware sends command 0c itself: for host command 05, and for a request the host
+ *   makes of the drive while it reports no disc, a play among them. The caller then finds the
+ *   tray open and closes it.
+ * - The tray and the disc are the caller's, so these calls work on a failed board too.
  * - The tray and the disc stay through the board's reset, an open tray open, and a clone has both.
  * - Unconfirmed: the reports a real drive sends after its tray closes, their order and how long
  *   each lasts. A drive has to spin up and look for a disc first, and here the first link frame
- *   after the close already reports paused or no disc. Also what a drive obeys with its tray open
- *   or without a disc, the bytes after the status in reports 80 and 83 (zeros here), whether a
- *   drive with an open tray reports it from its first link frame after a reset, and what command
- *   0c does in a drive whose lid opens by hand. */
+ *   after the close, or after the opening's three, already reports paused or no disc. Also what a
+ *   drive obeys with its tray open or without a disc, the bytes after the status in reports 80
+ *   and 83 (zeros here), whether a drive with an open tray reports it from its first link frame
+ *   after a reset, and what command 0c does in a drive whose lid opens by hand. */
+#define CDBLOCK_DISC_TRAY_OPEN 1
+#define CDBLOCK_DISC_PRESENT 2
 CDBLOCK_EXPORT int cdblock_drive_disc_tray(cdblock_board *board, int open);
 CDBLOCK_EXPORT int cdblock_drive_disc_present(cdblock_board *board, int present);
+CDBLOCK_EXPORT int cdblock_drive_disc_state(cdblock_board *board);
 
 /* MPEG card.
  * - cdblock_card_request pulses a data request count times, TIOCA1 for video or TIOCA0 for audio,
