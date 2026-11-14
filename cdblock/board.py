@@ -380,6 +380,17 @@ class Board:
         # The library holds the callback, so it stays referenced here.
         self._subcodes, self._subcode_callback = provider, callback
 
+    def drive_disc_tray(self, opened):
+        """The disc drive's tray opens or closes. Open, the drive stops where it is, reports status
+        80 and obeys no command. Closed on a disc it starts as at power-on, paused at the first
+        frame address, and closed on none it reports status 83."""
+        self._ok(self.lib.cdblock_drive_disc_tray(self.handle, 1 if opened else 0))
+
+    def drive_disc_present(self, present):
+        """The disc goes into the open tray or comes out of it. Taking it out clears its contents:
+        the tracks, sectors, subcode and sector states given. The providers stay with the drive."""
+        self._ok(self.lib.cdblock_drive_disc_present(self.handle, 1 if present else 0))
+
     def _provider_callback(self, answer):
         """answer(frame_address, out) as the library calls a provider. An exception from it fails
         the board."""
