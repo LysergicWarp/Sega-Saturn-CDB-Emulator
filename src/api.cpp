@@ -37,6 +37,7 @@ static_assert(uint32_t(LogKind::DriveReport) == CDBLOCK_LOG_DRIVE_REPORT);
 static_assert(uint32_t(LogKind::DriveSector) == CDBLOCK_LOG_DRIVE_SECTOR);
 static_assert(uint32_t(LogKind::SerialSent) == CDBLOCK_LOG_SERIAL_SENT);
 static_assert(uint32_t(LogKind::SerialLost) == CDBLOCK_LOG_SERIAL_LOST);
+static_assert(uint32_t(LogKind::DriveAudio) == CDBLOCK_LOG_DRIVE_AUDIO);
 
 struct cdblock_board
 {
@@ -609,6 +610,17 @@ int cdblock_drive_disc_state(cdblock_board *b)
     if (!disc)
         return fail(b, "the drive is not the disc drive");
     return (disc->tray_opened() ? CDBLOCK_DISC_TRAY_OPEN : 0) | (disc->disc_present() ? CDBLOCK_DISC_PRESENT : 0);
+}
+
+int cdblock_set_audio_sink(cdblock_board *b, cdblock_audio_sink sink, void *user)
+{
+    if (!sink)
+        b->board->set_audio_sink(nullptr);
+    else
+        b->board->set_audio_sink([sink, user](uint32_t frame_address, const uint8_t *raw, unsigned speed) {
+            return sink(user, frame_address, raw, int(speed));
+        });
+    return 0;
 }
 
 int cdblock_drive_feed_link_frame(cdblock_board *b, const uint8_t link_frame[13])

@@ -18,6 +18,12 @@
 // streams while paused, seeking or scanning, where a block's first frame falls against the
 // sector's header, and what the sync frames carry.
 //
+// A sector the drive reads between the first track's start and the lead-out is audio when its Q
+// has the data bit clear in the control byte, and without a Q the drive can read when its track's
+// control byte has. From the read's frame address on it goes toward the audio output, and to the
+// decoder input as any sector. Unconfirmed: whether a real drive's audio sectors reach the decoder
+// input, whether it is silent while it scans, and where its audio starts and ends around a play.
+//
 // The tray and the disc are the caller's: a tray that opens and closes, and a disc that goes in or
 // out while it is open. Opening stops the drive where it is. It then reports the open tray and
 // obeys nothing until the tray closes. Closing with a disc starts the drive as at power-on, paused
@@ -152,8 +158,9 @@ using SectorProvider = std::function<int(uint32_t frame_address, uint8_t *raw)>;
 // A sector's subcode: its 96 symbols in disc order, R to W in the low six bits of each and the Q
 // channel in bit 6.
 using Subcode = std::array<uint8_t, 96>;
-// Called as the drive takes a sector's subcode, for a report's Q or a subcode block, with its
-// frame address and the symbols the disc holds there to change. Nonzero fails the board.
+// Called as the drive takes a sector's subcode, for a report's Q, a subcode block or to tell an
+// audio sector by its Q, with its frame address and the symbols the disc holds there to change.
+// Nonzero fails the board.
 using SubcodeProvider = std::function<int(uint32_t frame_address, uint8_t *symbols)>;
 
 class DiscDrive final : public Drive
@@ -228,7 +235,8 @@ class DiscDrive final : public Drive
     // Puts the disc in or takes it out, through an open tray. Taking it out clears its tracks,
     // sectors, subcode and sector states. The providers stay with the drive.
     void set_disc(bool in);
-    // A raw sector of 2352 bytes read at frame_address, in place of one with only a mode 1 header.
+    // A raw sector of 2352 bytes read at frame_address, in place of one with only a mode 1 header,
+    // or of an audio sector's silence.
     void write_sector(uint32_t frame_address, std::vector<uint8_t> raw)
     {
         sectors[frame_address] = std::move(raw);
@@ -315,7 +323,8 @@ class DiscDrive final : public Drive
     Subcode block{};
     uint64_t block_at = 0, block_period = 0, subcode_at = 0;
     unsigned block_frame = 0;
-    // The subcode the drive took last, for a report's Q or a block, and its frame address. The
+    // The subcode the drive took last, for a report's Q, a block or an audio sector's Q, and its
+    // frame address. The
     // drive takes it anew after subcode is written, a provider is set or the drive starts.
     Subcode taken_symbols{};
     uint32_t taken_address = 0;
@@ -344,6 +353,10 @@ class DiscDrive final : public Drive
     // an unreachable one.
     uint32_t landing() const;
     void halt(Mode next);
+    // Whether the sector at frame_address is audio: from the first track's start to the lead-out,
+    // one whose Q has the data bit clear in its control byte, or without a Q the drive can read
+    // one in a track whose control byte has it clear.
+    bool audio_at(uint32_t frame_address);
     void deliver(DrivePort &port, uint32_t frame_address);
     // The subcode of the sector at frame_address: the disc's, or zeros, as the provider leaves it.
     const Subcode &symbols_at(uint32_t frame_address);

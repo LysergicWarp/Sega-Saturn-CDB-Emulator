@@ -5,7 +5,8 @@
 // next action, through DrivePort.
 //
 // The interface carries link frames as the drive's strobes, each with its COMSYNC level, sectors
-// into the decoder input, and the subcode stream a frame at a time.
+// into the decoder input, audio sectors toward the audio output, and the subcode stream a frame at
+// a time.
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -99,6 +100,9 @@ class DrivePort
     // A sector into the decoder input with its header flag, then on DMA channel 0. Returns the
     // words the channel took.
     virtual size_t sector(const std::vector<uint8_t> &bytes, uint16_t status) = 0;
+    // An audio sector on the drive's data stream, its 2352 bytes, which the interface chip sends on
+    // as digital audio, and the drive's speed, 1 single or 2 double.
+    virtual void audio(uint32_t frame_address, const uint8_t *raw, unsigned speed) = 0;
     // A subcode frame on the drive's subcode lines: its symbol, and whether it starts a block.
     virtual void subcode(uint8_t symbol, bool block_start) = 0;
     virtual void note(Note kind, uint32_t address, uint32_t value, std::string text) = 0;

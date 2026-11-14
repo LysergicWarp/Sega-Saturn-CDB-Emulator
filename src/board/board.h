@@ -4,6 +4,7 @@
 // manual's SH-1 board shows them. It knows no firmware: every firmware-specific address enters
 // through the caller.
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -312,7 +313,17 @@ class Board final : public Sh1Port, public DrivePort
     }
     size_t sector(const std::vector<uint8_t> &bytes, uint16_t status) override;
     void subcode(uint8_t symbol, bool block_start) override;
+    void audio(uint32_t frame_address, const uint8_t *raw, unsigned speed) override;
     void note(Note kind, uint32_t address, uint32_t value, std::string text) override;
+
+    // The interface chip's digital audio output to the main board: each audio sector the drive
+    // plays goes to sink with the drive's speed, none for an empty one. Nonzero from it fails the
+    // board. The sink stays through a reset and another drive, and a copy of the board calls it too.
+    using AudioSink = std::function<int(uint32_t frame_address, const uint8_t *raw, unsigned speed)>;
+    void set_audio_sink(AudioSink sink)
+    {
+        audio_sink = std::move(sink);
+    }
 
   private:
     // The CPU, the DMAC, and the caller's accesses as the CPU would make them.
@@ -349,6 +360,7 @@ class Board final : public Sh1Port, public DrivePort
     DriveSlot drive_;
     RunControl run_;
     Logbook logbook_;
+    AudioSink audio_sink;
 
     std::vector<uint8_t> covered;
     uint64_t executed = 0;

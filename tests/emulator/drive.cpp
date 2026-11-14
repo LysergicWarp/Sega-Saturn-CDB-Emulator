@@ -1619,6 +1619,312 @@ void disc_drive_tray()
     CHECK(cdblock_drive_disc_state(b) == open_tray);
 }
 
+// An audio sink that records each frame address and speed it is given and the sector's bytes, and
+// returns stop. With a board it reads that board as it is called: the clock, and port B, where
+// DEMP is.
+struct Audio
+{
+    std::vector<uint32_t> frame_addresses;
+    std::vector<int> speeds;
+    std::vector<uint8_t> given;
+    int stop = 0;
+    cdblock_board *board = nullptr;
+    std::vector<uint64_t> cycles;
+    bool peeked = true;
+};
+
+int take_audio(void *user, uint32_t frame_address, const uint8_t *raw, int speed)
+{
+    auto &audio = *static_cast<Audio *>(user);
+    audio.frame_addresses.push_back(frame_address);
+    audio.speeds.push_back(speed);
+    audio.given.assign(raw, raw + 2352);
+    if (audio.board)
+    {
+        uint8_t port = 0;
+        audio.peeked = cdblock_peek(audio.board, 0x05ffffc3, &port, 1) == 0 && audio.peeked;
+        audio.cycles.push_back(cdblock_clock_cycles(audio.board));
+    }
+    return audio.stop;
+}
+
+void disc_drive_audio()
+{
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    Audio audio;
+    audio.board = b;
+    // The sink is the board's, whatever its drive.
+    CHECK(cdblock_set_audio_sink(b, take_audio, &audio) == 0);
+    cdblock_drive_config config;
+    cdblock_drive_config_defaults(&config);
+    config.seek_cycles = 0;
+    Peer peer(b, &config);
+    // A data track, an audio track from 1000 and the lead-out at 2000.
+    const cdblock_track tracks[2] = {{150, 0x41}, {1000, 0x01}};
+    CHECK(cdblock_drive_disc_tracks(b, tracks, 2, 2000) == 0);
+    uint8_t raw[2352];
+    for (size_t i = 0; i < sizeof raw; ++i)
+        raw[i] = uint8_t(i * 7 + 1);
+    CHECK(cdblock_drive_disc_sector(b, 1101, raw, sizeof raw) == 0);
+    CHECK(cdblock_drive_disc_sector_state(b, 1103, 1, CDBLOCK_SECTOR_MISSING, 0) == 0);
+    CHECK(cdblock_drive_disc_sector_state(b, 1104, 1, CDBLOCK_SECTOR_UNREADABLE, 0x0021) == 0);
+    auto command = [&](Peer &to, uint8_t code, uint32_t frame_address, uint8_t speed) {
+        to.stage(code, frame_address, speed);
+        to.link_frame();
+        return to.link_frame();
+    };
+    auto frames = [&](Peer &to, int count) {
+        std::vector<uint8_t> last;
+        for (int i = 0; i < count; ++i)
+            last = to.link_frame();
+        return last;
+    };
+    using Addresses = std::vector<uint32_t>;
+    const std::vector<uint8_t> silence(2352, 0);
+    auto played = [&] { return b.log(CDBLOCK_LOG_DRIVE_AUDIO).size(); };
+    auto read = [&] { return b.log(CDBLOCK_LOG_DRIVE_SECTOR).size(); };
+
+    // A paused drive plays nothing. A play lands 4 frames before its frame address, in the audio
+    // track, and those sectors are muted.
+    peer.link_frame();
+    std::vector<uint8_t> r = command(peer, 0x06, 1100, 1);
+    CHECK(r[0] == 0x36 && r[1] == 0x01 && r[2] == 0x02 && r[9] == 0x14 && r[10] == 0x46);
+    frames(peer, 4);
+    CHECK(audio.frame_addresses.empty() && played() == 0);
+    // Then each sector once and in order, a sector period apart: silence where the disc has no
+    // sector written, the written one as written, none for a missing one, and an unreadable one's
+    // samples all the same.
+    peer.link_frame();
+    const uint64_t first = peer.strobes.front();
+    CHECK((audio.frame_addresses == Addresses{1100}) && audio.given == silence);
+    peer.link_frame();
+    CHECK((audio.frame_addresses == Addresses{1100, 1101}) && peer.strobes.front() == first + single_speed);
+    CHECK(audio.given == std::vector<uint8_t>(raw, raw + sizeof raw));
+    // The sink is told the speed, and reads the board as it is called: a sector period apart.
+    CHECK((audio.speeds == std::vector<int>{1, 1}) && audio.cycles[1] == audio.cycles[0] + single_speed);
+    frames(peer, 2);
+    CHECK((audio.frame_addresses == Addresses{1100, 1101, 1102}));
+    peer.link_frame();
+    CHECK((audio.frame_addresses == Addresses{1100, 1101, 1102, 1104}) && audio.given == silence);
+    // Each is logged with its frame address and the speed. All reached the decoder input too, the
+    // muted ones as well, and the subcode stream ran.
+    const auto entries = b.log(CDBLOCK_LOG_DRIVE_AUDIO);
+    CHECK(entries.size() == 4 && entries.front().address == 1100 && entries.back().address == 1104);
+    CHECK(entries.front().value == 1 && entries.back().value == 1);
+    CHECK(read() == 4 + 4 && b.log(CDBLOCK_LOG_DRIVE_SECTOR).front().address == 1096 && !peer.frames.empty());
+    CHECK(b.log(CDBLOCK_LOG_DRIVE_SECTOR).back().address == 1104);
+
+    // A pause stops the calls as the drive obeys it, after the sector of the link frame that
+    // carried it. A play from the drive's position goes on there.
+    peer.stage(0x08);
+    peer.link_frame();
+    CHECK(audio.frame_addresses.back() == 1105 && peer.link_frame()[0] == 0x46);
+    peer.link_frame();
+    CHECK(audio.frame_addresses.size() == 5);
+    CHECK(command(peer, 0x06, 1106, 1)[0] == 0x36);
+    frames(peer, 5);
+    CHECK(audio.frame_addresses.size() == 6 && audio.frame_addresses.back() == 1106);
+    // A scan and a seek stop them too.
+    CHECK(command(peer, 0x0a, 0, 1)[0] == 0x56 && audio.frame_addresses.back() == 1107);
+    frames(peer, 2);
+    CHECK(command(peer, 0x09, 1500, 1)[0] == 0x46);
+    frames(peer, 2);
+    CHECK(audio.frame_addresses.size() == 7 && played() == 7);
+
+    // A read of the data track calls nothing, and its sectors reach the decoder input.
+    size_t at = read();
+    command(peer, 0x06, 500, 2);
+    frames(peer, 5);
+    CHECK(audio.frame_addresses.size() == 7 && read() == at + 5);
+    // A read at double speed that runs from the data track into the audio track: one more sector
+    // as its command goes out, the six data sectors, then the audio from the track's start, to
+    // both. The audio plays at that speed, half a single-speed sector period apart.
+    at = read();
+    command(peer, 0x06, 998, 2);
+    frames(peer, 8);
+    CHECK(read() == at + 1 + 6 + 2 && b.log(CDBLOCK_LOG_DRIVE_SECTOR).back().address == 1001);
+    CHECK(audio.frame_addresses.size() == 9 && audio.frame_addresses[7] == 1000 && audio.frame_addresses[8] == 1001);
+    CHECK(audio.speeds[7] == 2 && audio.speeds[8] == 2 && audio.cycles[8] == audio.cycles[7] + double_speed);
+    CHECK(b.log(CDBLOCK_LOG_DRIVE_AUDIO).back().value == 2);
+    // Past the lead-out nothing is audio, though the reports carry the last track's control byte
+    // there: those sectors reach the decoder input alone.
+    at = read();
+    command(peer, 0x06, 1998, 1);
+    r = frames(peer, 8);
+    CHECK(r[1] == 0x01 && r[2] == 0xaa);
+    CHECK(audio.frame_addresses.size() == 12 && audio.frame_addresses[9] == 1002);
+    CHECK(audio.frame_addresses[10] == 1998 && audio.frame_addresses[11] == 1999);
+    CHECK(read() == at + 1 + 4 + 2 + 2 && b.log(CDBLOCK_LOG_DRIVE_SECTOR).back().address == 2001);
+
+    // The sector provider's bytes are the ones played. It is given silence for an audio sector the
+    // disc does not hold.
+    Sectors sectors;
+    CHECK(cdblock_drive_disc_sector_provider(b, provide_sectors, &sectors) == 0);
+    command(peer, 0x06, 1200, 1);
+    frames(peer, 5);
+    CHECK(audio.frame_addresses.size() == 13 && audio.frame_addresses.back() == 1200 &&
+          sectors.frame_addresses.back() == 1200 && sectors.given == silence);
+    CHECK(audio.given[16] == uint8_t(1200) && audio.given[2351] == 0x5a);
+    // A copy calls the same sink.
+    cdblock_board *raw_copy = cdblock_clone(b);
+    CHECK(raw_copy != nullptr);
+    if (!raw_copy)
+        return;
+    {
+        Board copy(raw_copy);
+        Peer copied(copy, nullptr, false);
+        copied.link_frame();
+        CHECK(audio.frame_addresses.size() == 14 && audio.frame_addresses.back() == 1201);
+    }
+    peer.link_frame();
+    CHECK(audio.frame_addresses.size() == 15 && audio.frame_addresses.back() == 1201);
+    // The sink stays through the board's reset, and with another drive.
+    CHECK(cdblock_reset(b) == 0);
+    sci0(b);
+    command(peer, 0x06, 1300, 1);
+    frames(peer, 5);
+    CHECK(audio.frame_addresses.size() == 16 && audio.frame_addresses.back() == 1300);
+    CHECK(cdblock_drive_select_disc(b, &config) == 0 && cdblock_drive_disc_tracks(b, tracks, 2, 2000) == 0);
+    command(peer, 0x06, 1400, 1);
+    frames(peer, 5);
+    CHECK(audio.frame_addresses.size() == 17 && audio.frame_addresses.back() == 1400 && audio.given == silence);
+    // Without a sink the sectors are still logged.
+    const size_t logged = played();
+    CHECK(cdblock_set_audio_sink(b, nullptr, nullptr) == 0);
+    peer.link_frame();
+    CHECK(audio.frame_addresses.size() == 17 && played() == logged + 1);
+    // A nonzero status fails the board, naming it and the frame address.
+    audio.stop = 9;
+    CHECK(cdblock_set_audio_sink(b, take_audio, &audio) == 0);
+    peer.link_frame();
+    CHECK(peer.failed && contains(b.error(), "audio sink") && contains(b.error(), "status 9 at frame address 1402"));
+    CHECK(b.run(1) == CDBLOCK_EXIT_ERROR && contains(b.error(), "reset"));
+    // The failed board takes another sink, which the drive calls after the reset. Every call read
+    // the board.
+    Audio other;
+    CHECK(cdblock_set_audio_sink(b, take_audio, &other) == 0 && cdblock_reset(b) == 0);
+    sci0(b);
+    peer.failed = false;
+    const size_t calls = audio.frame_addresses.size();
+    command(peer, 0x06, 1500, 1);
+    frames(peer, 5);
+    CHECK((other.frame_addresses == Addresses{1500}) && audio.frame_addresses.size() == calls && audio.peeked);
+}
+
+void disc_drive_audio_by_q()
+{
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    Audio audio;
+    CHECK(cdblock_set_audio_sink(b, take_audio, &audio) == 0);
+    cdblock_drive_config config;
+    cdblock_drive_config_defaults(&config);
+    config.landing_frames = 0; // plays start at their frame address: this test checks what they deliver
+    config.seek_cycles = 0;
+    Peer peer(b, &config);
+    auto command = [&](Peer &to, uint8_t code, uint32_t frame_address, uint8_t speed) {
+        to.stage(code, frame_address, speed);
+        to.link_frame();
+        return to.link_frame();
+    };
+    auto frames = [&](Peer &to, int count) {
+        for (int i = 0; i < count; ++i)
+            to.link_frame();
+    };
+    using Addresses = std::vector<uint32_t>;
+    auto read = [&] { return b.log(CDBLOCK_LOG_DRIVE_SECTOR).size(); };
+    // A data track, an audio track from 1000 and the lead-out at 2000. The disc's subcode gives the
+    // audio track a pregap from 996, one of its sectors with a Q of ADR 2, and in the audio track a
+    // Q with the data bit and one whose CRC is wrong.
+    const cdblock_track tracks[2] = {{150, 0x41}, {1000, 0x01}};
+    CHECK(cdblock_drive_disc_tracks(b, tracks, 2, 2000) == 0);
+    for (const uint32_t frame_address : {996u, 998u, 999u})
+    {
+        const Q pregap = q_at(0x01, 0x02, 0x00, 999 - frame_address, frame_address);
+        CHECK(cdblock_drive_disc_subcode(b, frame_address, q_symbols(pregap).data()) == 0);
+    }
+    const Q catalogue = {0x02, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x30, 0x00, 0x22};
+    CHECK(cdblock_drive_disc_subcode(b, 997, q_symbols(catalogue).data()) == 0);
+    const Q data = q_at(0x41, 0x02, 0x01, 2, 1002);
+    CHECK(cdblock_drive_disc_subcode(b, 1002, q_symbols(data).data()) == 0);
+    CHECK(cdblock_drive_disc_subcode(b, 1003, q_symbols(q_at(0x41, 0x02, 0x01, 3, 1003), true).data()) == 0);
+
+    // The Q says which sector is audio, whatever its ADR and whichever track holds the sector: the
+    // pregap in the data track is, the audio track's sector with the data bit is not. A Q the drive
+    // cannot read leaves it to the track. Every sector reaches the decoder input.
+    command(peer, 0x06, 995, 1);
+    frames(peer, 10);
+    CHECK((audio.frame_addresses == Addresses{996, 997, 998, 999, 1000, 1001, 1003, 1004}));
+    CHECK(read() == 10 && b.log(CDBLOCK_LOG_DRIVE_SECTOR).back().address == 1004);
+    // The subcode provider's Q counts as the disc's, and the drive asks it once for each sector.
+    Qs qs;
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_q, &qs) == 0);
+    command(peer, 0x06, 1100, 1);
+    const size_t asked = qs.calls, played = audio.frame_addresses.size();
+    frames(peer, 3);
+    CHECK(qs.calls == asked + 3 && audio.frame_addresses.size() == played);
+    CHECK(b.log(CDBLOCK_LOG_DRIVE_SECTOR).back().address == 1102);
+    CHECK(cdblock_drive_disc_subcode_provider(b, nullptr, nullptr) == 0);
+
+    // Opening the tray during a play stops the audio at once, and the closed tray plays nothing
+    // until the next play.
+    command(peer, 0x06, 1200, 1);
+    frames(peer, 2);
+    CHECK(audio.frame_addresses.back() == 1201 && cdblock_drive_disc_tray(b, 1) == 0);
+    const size_t opened = audio.frame_addresses.size();
+    frames(peer, 3);
+    CHECK(cdblock_drive_disc_tray(b, 0) == 0);
+    frames(peer, 2);
+    CHECK(audio.frame_addresses.size() == opened);
+    command(peer, 0x06, 1300, 1);
+    frames(peer, 1);
+    CHECK(audio.frame_addresses.size() == opened + 1 && audio.frame_addresses.back() == 1300);
+    // Another disc's tracks say what is audio from its first play on: here its one data track.
+    CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_present(b, 0) == 0);
+    CHECK(cdblock_drive_disc_present(b, 1) == 0);
+    frames(peer, 3);
+    CHECK(cdblock_drive_disc_tray(b, 0) == 0);
+    const size_t changed = audio.frame_addresses.size(), before = read();
+    command(peer, 0x06, 1300, 1);
+    frames(peer, 2);
+    CHECK(audio.frame_addresses.size() == changed && read() == before + 2);
+
+    // An audio first track, a data track from 1000 and the lead-out at 2000. Nothing before the
+    // first track or from the lead-out on is audio, though its Q names audio.
+    const cdblock_track audio_first[2] = {{150, 0x01}, {1000, 0x41}};
+    CHECK(cdblock_drive_disc_tracks(b, audio_first, 2, 2000) == 0);
+    for (const uint32_t frame_address : {149u, 2000u})
+    {
+        const Q named = q_at(0x01, 0x01, 0x01, 0, frame_address);
+        CHECK(cdblock_drive_disc_subcode(b, frame_address, q_symbols(named).data()) == 0);
+    }
+    size_t count = audio.frame_addresses.size();
+    command(peer, 0x06, 148, 1);
+    frames(peer, 4);
+    CHECK(audio.frame_addresses.size() == count + 2 && audio.frame_addresses[count] == 150);
+    CHECK(audio.frame_addresses.back() == 151);
+    // One more audio sector as the next play's command goes out, then none through the lead-out.
+    command(peer, 0x06, 1998, 1);
+    frames(peer, 4);
+    CHECK(audio.frame_addresses.size() == count + 3 && audio.frame_addresses.back() == 152);
+    CHECK(b.log(CDBLOCK_LOG_DRIVE_SECTOR).back().address == 2001);
+    // An audio sector the disc does not hold is silence at the decoder input too: zeros where a
+    // data sector has its header.
+    command(peer, 0x06, 1000, 2);
+    arm_channel0(b);
+    peer.link_frame();
+    CHECK(b.peek(0x09002000, 4) == 0x00132501);
+    command(peer, 0x06, 500, 2);
+    arm_channel0(b);
+    peer.link_frame();
+    const auto last = b.log(CDBLOCK_LOG_DRIVE_SECTOR).back();
+    CHECK(b.peek(0x09002000, 4) == 0 && last.address == 500 && last.value == 1170);
+    CHECK(audio.frame_addresses.back() == 500);
+}
+
 void disc_drive_long_advance()
 {
     Program p;
@@ -1762,6 +2068,8 @@ const std::vector<Test> drive_tests = {
     {"disc drive speed", disc_drive_speed},
     {"disc drive reset and copy", disc_drive_reset_and_clone},
     {"disc drive tray and disc change", disc_drive_tray},
+    {"disc drive audio and its sink", disc_drive_audio},
+    {"disc drive audio by the Q and through the tray", disc_drive_audio_by_q},
     {"disc drive over a long advance", disc_drive_long_advance},
     {"disc drive and a timer in the skip query", disc_drive_and_timer_skip},
     {"disc drive read landing before its frame address", disc_drive_landing},

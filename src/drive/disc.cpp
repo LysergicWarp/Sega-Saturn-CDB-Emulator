@@ -26,6 +26,8 @@ constexpr RingAnswer yabause{0x44f1, {0x09, 0x09, 0x09, 0x09}};
 constexpr uint8_t first_track = 0xa0, last_track = 0xa1, lead_out_point = 0xa2;
 // A raw sector and the bytes from its header on, past the 12 sync bytes.
 constexpr size_t raw_sector = 2352, from_header = raw_sector - 12;
+// The control/ADR byte's bit of a data track.
+constexpr uint8_t data_bit = 0x40;
 
 uint8_t bcd(uint32_t value)
 {
@@ -481,13 +483,31 @@ void DiscDrive::halt(Mode next)
     subcode_at = 0;
 }
 
+bool DiscDrive::audio_at(uint32_t frame_address)
+{
+    // Before the first track and past the lead-out nothing counts as audio, whatever the control
+    // byte the reports carry there: disc authentication reads its ring past the lead-out as data.
+    if (frame_address < tracks.front().start || frame_address >= lead_out)
+        return false;
+    // The sector's Q says which it is, as in a report, so a pregap follows the Q it holds. Without
+    // a Q the drive can read, the track holding the sector does.
+    uint8_t q[10];
+    if (q_of(symbols_at(frame_address), q))
+        return !(q[0] & data_bit);
+    size_t t = tracks.size() - 1;
+    while (tracks[t].start > frame_address)
+        --t;
+    return !(tracks[t].control & data_bit);
+}
+
 void DiscDrive::deliver(DrivePort &port, uint32_t frame_address)
 {
-    // A missing sector reaches nothing: no header for the interface to find.
+    // A missing sector reaches nothing: no header for the interface to find, and no samples.
     const Span *span = span_at(frame_address);
     if (span && span->state == Sector::Missing)
         return;
     const uint16_t status = span && span->state == Sector::Unreadable ? span->status : 0;
+    const bool audio = audio_at(frame_address);
     std::vector<uint8_t> raw;
     const auto found = sectors.find(frame_address);
     if (found != sectors.end())
@@ -496,16 +516,25 @@ void DiscDrive::deliver(DrivePort &port, uint32_t frame_address)
     }
     else
     {
-        // The sync pattern and a mode 1 header.
+        // Silence in an audio track, elsewhere the sync pattern and a mode 1 header.
         raw.assign(raw_sector, 0);
-        std::fill(raw.begin() + 1, raw.begin() + 11, uint8_t(0xff));
-        msf(&raw[12], frame_address);
-        raw[15] = 1;
+        if (!audio)
+        {
+            std::fill(raw.begin() + 1, raw.begin() + 11, uint8_t(0xff));
+            msf(&raw[12], frame_address);
+            raw[15] = 1;
+        }
     }
     if (sector_provider)
         if (const int stop = sector_provider(frame_address, raw.data()))
             throw std::runtime_error("the sector provider stopped the run with status " + std::to_string(stop) +
                                      " at frame address " + std::to_string(frame_address));
+    // The samples go out from the play's frame address on. The sectors the drive lands on before it
+    // are muted, unconfirmed: where a real drive starts its audio is not known.
+    if (audio && frame_address >= target)
+        port.audio(frame_address, raw.data(), speed);
+    // An audio sector reaches the decoder input as well, as any sector does, unconfirmed: what the
+    // decoder input does with a sector that has no sync pattern is not known.
     const std::vector<uint8_t> bytes(raw.end() - std::ptrdiff_t(from_header), raw.end());
     const size_t moved = port.sector(bytes, status);
     char text[16] = "";
