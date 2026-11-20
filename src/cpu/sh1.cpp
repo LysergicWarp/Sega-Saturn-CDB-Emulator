@@ -145,25 +145,26 @@ uint16_t Sh1::read_word(uint32_t address)
     return port->read16(address);
 }
 
-void Sh1::before_instruction(uint32_t pc)
+Sh1::Boundary Sh1::before_instruction(uint32_t pc)
 {
     if (recheck)
     {
         recheck = false;
         test_irq = true;
     }
-    port->boundary(pc);
+    if (port->boundary(pc))
+        return Boundary::Stop;
     const bool slot = state.delay != 0;
     // An address error is taken at the first boundary outside a delay slot, after the instruction
     // that raised it, interrupt-disabling ones included (sections 4.3.2 and 4.6).
     if (!slot && take_address_error())
-        throw Redirect{};
+        return Boundary::Redirect;
     const bool broke = port->fetch_break(pc);
     fetched_opcode = port->fetch(pc);
     // A break on this fetch comes before the instruction executes, where the boundary accepts an
     // interrupt. Elsewhere the instruction runs first (section 6.3.3).
     if (broke && !slot && !holding && accept_interrupt())
-        throw Redirect{};
+        return Boundary::Redirect;
     if (undefined(fetched_opcode) || (slot && changes_pc(fetched_opcode)))
     {
         // General illegal pushes the instruction's address, slot illegal the branch target
@@ -172,11 +173,12 @@ void Sh1::before_instruction(uint32_t pc)
         state.delay = 0;
         holding = false;
         enter_exception(slot ? 6 : 4, pushed);
-        throw Redirect{};
+        return Boundary::Redirect;
     }
     port->executing(pc, fetched_opcode, slot);
     holding = holds_interrupt(fetched_opcode);
     fetched = true;
+    return Boundary::Execute;
 }
 
 void Sh1::check_interrupts()

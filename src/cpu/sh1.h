@@ -20,8 +20,8 @@ class Sh1Port
     virtual void write16(uint32_t address, uint16_t value) = 0;
     virtual void write32(uint32_t address, uint32_t value) = 0;
     virtual uint16_t fetch(uint32_t address) = 0;
-    // Each instruction boundary, before the fetch. Throws Sh1::Stop to end the run there.
-    virtual void boundary(uint32_t pc) = 0;
+    // Each instruction boundary, before the fetch. True ends the run there.
+    virtual bool boundary(uint32_t pc) = 0;
     // The instruction about to execute.
     virtual void executing(uint32_t pc, uint16_t opcode, bool slot) = 0;
     // The interrupt controller's choice: the request's priority level (0 for none) and vector.
@@ -56,11 +56,6 @@ class Sh1
         uint32_t delay = 0;
         Sleep sleep = Sleep::Awake;
     };
-    // Thrown by the board's boundary hook to end a run before the instruction at that boundary.
-    struct Stop
-    {
-    };
-
     // SR bits.
     static constexpr uint32_t SH_T = 0x00000001;
     static constexpr uint32_t SH_S = 0x00000002;
@@ -81,7 +76,7 @@ class Sh1
 
     // Power-on reset: PC and SP from vectors 0 and 1, SR.I at 15, VBR 0 (section 4.2).
     void reset();
-    // Executes until the board's boundary hook throws Stop.
+    // Executes until the board's boundary hook ends the run, before the instruction at that boundary.
     void run();
     // The board changed an interrupt source: evaluate requests at the next boundary.
     void request_check()
@@ -95,10 +90,14 @@ class Sh1
     }
 
   private:
-    // Thrown at a boundary where an address error, a user break or an illegal instruction is taken
-    // instead of the instruction there: the loop starts again at the handler.
-    struct Redirect
+    // What a boundary leaves the loop to do: execute the instruction it fetched, start again at the
+    // handler of an address error, a user break or an illegal instruction taken instead of it, or
+    // end the run.
+    enum class Boundary : uint8_t
     {
+        Execute,
+        Redirect,
+        Stop
     };
     Sh1Port *port;
     // The opcode the boundary fetched, which the loop's own fetch then takes instead of reading
@@ -112,7 +111,7 @@ class Sh1
     bool recheck = false;
     bool test_irq = false; // interrupts to evaluate after the instruction, outside a delay slot
 
-    void before_instruction(uint32_t pc);
+    Boundary before_instruction(uint32_t pc);
     void check_interrupts();
     bool accept_interrupt();
     bool take_address_error();

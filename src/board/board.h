@@ -283,7 +283,7 @@ class Board final : public Sh1Port, public DrivePort
         store(address, 4, value, Master::Cpu);
     }
     uint16_t fetch(uint32_t address) override;
-    void boundary(uint32_t pc) override;
+    bool boundary(uint32_t pc) override;
     void executing(uint32_t pc, uint16_t opcode, bool slot) override;
     unsigned interrupt_request(unsigned &vector) override
     {

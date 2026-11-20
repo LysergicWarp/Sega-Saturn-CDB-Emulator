@@ -32,26 +32,25 @@ constexpr int32_t sext(uint32_t value, unsigned bits) {
 
 void Sh1::run() {
     for (;;) {
-        try {
-            if (!state.delay && !holding) accept_interrupt();
-            for (;;) {
-                before_instruction(state.pc);
-                const uint16_t opcode = read_word(state.pc);
-                if (state.delay) {
-                    // The slot runs with PC at the branch destination, so its PC-relative operands
-                    // take the destination + 2 (Programming Manual 6.33 and 6.36).
-                    state.pc = state.delay;
-                    state.delay = 0;
-                } else {
-                    state.pc += 2;
-                }
-                execute_one(opcode);
-                if (test_irq && !state.delay) {
-                    check_interrupts();
-                    test_irq = false;
-                }
+        if (!state.delay && !holding) accept_interrupt();
+        for (;;) {
+            const Boundary boundary = before_instruction(state.pc);
+            if (boundary == Boundary::Stop) return;
+            if (boundary == Boundary::Redirect) break;
+            const uint16_t opcode = read_word(state.pc);
+            if (state.delay) {
+                // The slot runs with PC at the branch destination, so its PC-relative operands
+                // take the destination + 2 (Programming Manual 6.33 and 6.36).
+                state.pc = state.delay;
+                state.delay = 0;
+            } else {
+                state.pc += 2;
             }
-        } catch (const Redirect &) {
+            execute_one(opcode);
+            if (test_irq && !state.delay) {
+                check_interrupts();
+                test_irq = false;
+            }
         }
     }
 }

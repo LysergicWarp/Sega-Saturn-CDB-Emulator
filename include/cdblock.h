@@ -141,8 +141,7 @@ CDBLOCK_EXPORT int cdblock_reset(cdblock_board *board);
  * so a run that starts on a stop returns at once, unless an interrupt is accepted at that boundary
  * first: the run then goes on from its handler. cdblock_run_from_stop ignores the stops at its
  * first boundary, and cdblock_step runs one instruction, as cdblock_run_from_stop does with a
- * budget of 1. A stop also fires on an instruction in a delay slot. Each run ends by unwinding an
- * exception inside the library, so fewer, longer runs cost less than many short ones.
+ * budget of 1. A stop also fires on an instruction in a delay slot.
  *
  * budget counts instruction boundaries. One where undefined code is refused, or an address error
  * or a break on the fetch is taken, counts though no instruction executes there, and

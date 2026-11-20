@@ -485,9 +485,6 @@ Exit Board::run(uint64_t budget, bool skip_first_stop)
     try
     {
         cpu.run();
-    }
-    catch (const Sh1::Stop &)
-    {
         return exit_reason;
     }
     catch (const std::exception &e)
@@ -499,12 +496,12 @@ Exit Board::run(uint64_t budget, bool skip_first_stop)
     return Exit::Error;
 }
 
-void Board::boundary(uint32_t pc)
+bool Board::boundary(uint32_t pc)
 {
     if (const auto exit = run_.boundary(pc, cpu.sleeping()))
     {
         exit_reason = *exit;
-        throw Sh1::Stop{};
+        return true;
     }
     // After the checks that end a run, so a run that ends here leaves the devices' turn to the next.
     if (options.device_timing && executed >= next_card_tick)
@@ -512,6 +509,7 @@ void Board::boundary(uint32_t pc)
         next_card_tick = executed + Card::period;
         card_.tick();
     }
+    return false;
 }
 
 void Board::executing(uint32_t pc, uint16_t opcode, bool slot)
