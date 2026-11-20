@@ -122,8 +122,8 @@ One instruction, from the loop in `Sh1::run`:
 1. `Sh1::before_instruction` calls `Board::boundary`, where `RunControl` says whether the run ends
    here. With device timing the card takes its tick there too.
 2. A pending address error is taken, then the opcode is fetched. A user break on the fetch,
-   undefined code or a branch in a delay slot is taken here too. Each of these enters its handler
-   and throws `Sh1::Redirect`, so the loop starts again there.
+   undefined code or a branch in a delay slot is taken here too. Each of these enters its handler,
+   and the loop starts again there.
 3. `Board::executing` checks the PC against the declared code, counts the instruction, marks its
    coverage, passes its cycles and writes the trace.
 4. PC moves on, to the branch destination in a delay slot, and `execute_one` dispatches to the
@@ -138,20 +138,23 @@ Time passes in one place, `Board::advance`:
   count.
 - With the clock, `Board::executing` advances `cycles_per_instruction` as each instruction starts,
   before its handler runs. `cdblock_clock_advance` advances what the caller gives.
-- Most advances only run the timers, in `Sh7034::advance`. When the next device event falls inside
-  the step, `Board::advance_events` runs the events in time order, with the timers brought up to
-  each: SCI0's transfer end, SCI1's transmitter, the serial line's far end and the drive's `act`.
+- Most advances only add to the cycle count, in `Sh7034::advance`. The ITU channels count when the
+  clock reaches the first count that does more than add one to a TCNT, a compare match or an
+  overflow. They also count before anything that changes a TCNT or what a channel counts by: a
+  write to their registers but TIER and TSR, an input capture, and the caller's `cdblock_timer_*`
+  calls. A TCNT read in between is the stored one plus the counts since.
+- When the next device event falls inside the step, `Board::advance_events` runs the events in
+  time order, with the timers brought up to each: SCI0's transfer end, SCI1's transmitter, the
+  serial line's far end and the drive's `act`.
 - A device that moves its next event calls `Board::events_moved`, and `advance` looks again.
 - There are no threads: everything runs on the caller's.
 
-`Sh1::run` never returns. It runs inside a `try` in `Board::run`, and a run ends with an exception:
+A run ends in one of two ways:
 
-- `Sh1::Stop` from `Board::boundary`, at a stop address, after a write stop, out of budget or in a
-  SLEEP with nothing to accept. `Board::run` returns the exit reason.
-- `std::runtime_error` from a failed check or the drive. `Board::run` keeps the text and marks the
-  board failed until its reset.
-
-`Sh1::Redirect` stays inside `Sh1::run` and ends no run.
+- `Board::boundary` returns true, at a stop address, after a write stop, out of budget or in a
+  SLEEP with nothing to accept. `Sh1::run` returns, and `Board::run` gives the exit reason.
+- A failed check or the drive throws `std::runtime_error`. `Board::run` catches it, keeps the text
+  and marks the board failed until its reset.
 
 To read the code, start from `include/cdblock.h`, then:
 
@@ -370,7 +373,6 @@ The [CD-block SH-1 demo](https://github.com/LysergicWarp/Sega-Saturn-CDblock-SH1
 
 - A run that starts on a stop returns at once from `cdblock_run`, unless an interrupt is accepted
   there first: the run then goes on from its handler. `cdblock_run_from_stop` steps off the stop.
-  Fewer, longer runs cost less than many short ones.
 - An event raised at a stop is accepted before the next instruction, unless the stop follows an
   LDC, STC, LDS or STS or sits in a delay slot, where no interrupt is accepted. Then the
   instruction at the stop runs first.
