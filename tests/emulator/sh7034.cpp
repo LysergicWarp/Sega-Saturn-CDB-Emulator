@@ -340,6 +340,107 @@ void clock_reconfigured_by_dma()
     CHECK(cdblock_clock_advance(b, 4) == 0 && b.peek(0x05ffff6a, 2) == 0 && b.peek(0x05ffff04, 1) == 0x83);
     CHECK(b.peek(0x05ffff08, 2) == 0);
     CHECK(cdblock_clock_advance(b, 80) == 0 && b.peek(0x05ffff08, 2) == 10);
+    // The other way, to a faster clock: the counts after the unit come at the new rate.
+    Board faster(p, &clocked);
+    faster.write(0x0f000100, 1, 0x00);       // the new TCR0: φ, free running
+    faster.write(0x05ffff04, 1, 0x23);       // TCR0: φ/8, cleared by GRA
+    faster.write(0x05ffff0a, 2, 3);          // GRA0: a match at the fourth count
+    faster.write(0x05ffff06, 1, 0x01);       // TIER0: IMIEA
+    faster.write(0x05ffff60, 4, 0x0f000100); // SAR2
+    faster.write(0x05ffff64, 4, 0x05ffff04); // DAR2: TCR0
+    faster.write(0x05ffff6a, 2, 1);          // TCR2
+    faster.write(0x05ffff6e, 2, 0x0801);     // CHCR2: both fixed, IMIA0, bytes, DE
+    faster.write(0x05ffff48, 2, 0x0001);
+    faster.write(0x05ffff00, 1, 0x01);
+    CHECK(cdblock_clock_advance(faster, 32) == 0 && faster.peek(0x05ffff6a, 2) == 0);
+    CHECK(faster.peek(0x05ffff04, 1) == 0x80 && faster.peek(0x05ffff08, 2) == 0);
+    CHECK(cdblock_clock_advance(faster, 20) == 0 && faster.peek(0x05ffff08, 2) == 20);
+}
+
+void clock_between_events()
+{
+    // The counts between a channel's compare matches and overflows are not made one by one. TCNT
+    // still reads as counted, and a change to it or to what the channel counts by stands from the
+    // cycle it comes at.
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    const uint32_t tsr = 0x05ffff07, tcnt = 0x05ffff08, gra = 0x05ffff0a, grb = 0x05ffff0c;
+    b.write(0x05ffff04, 1, 0x02); // TCR0: φ/4, free running
+    b.write(gra, 2, 1000);
+    b.write(grb, 2, 600);
+    b.write(0x05ffff00, 1, 0x01); // TSTR: channel 0
+    CHECK(b.run(102) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 25 && b.read(tcnt, 2) == 25);
+    // The skip query counts on from there: the match as TCNT leaves 1000, the 1001st count.
+    b.write(0x05ffff06, 1, 0x01); // TIER0: IMIEA
+    CHECK(cdblock_clock_next(b) == 1001 * 4 - 102);
+    // A TCNT written between two counts goes on from its value at the next, at cycle 104.
+    b.write(tcnt, 2, 500);
+    CHECK(b.run(2) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 501);
+    // GRA moved ahead of it: the match comes as TCNT leaves the value, at cycle 116.
+    b.write(gra, 2, 503);
+    CHECK(b.run(11) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 503 && !(b.peek(tsr, 1) & 1));
+    CHECK(b.run(1) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 504 && (b.peek(tsr, 1) & 1));
+    // Clearing the flag leaves the count as it is.
+    b.read(tsr, 1);
+    b.write(tsr, 1, 0xfe);
+    CHECK(b.run(8) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 506 && !(b.peek(tsr, 1) & 1));
+    // The caller's counter value, with the overflow two counts on, away from GRA and GRB.
+    CHECK(cdblock_timer_counter(b, 0, 0xfffe) == 0);
+    CHECK(b.run(4) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 0xffff && !(b.peek(tsr, 1) & 4));
+    CHECK(b.run(4) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 0 && (b.peek(tsr, 1) & 4));
+    // The caller's compare match between two counts, and the match as TCNT leaves the value again.
+    CHECK(b.run(8) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 2);
+    CHECK(cdblock_timer_compare(b, 0, 0) == 0 && b.peek(tcnt, 2) == 503 && (b.peek(tsr, 1) & 1));
+    b.read(tsr, 1);
+    b.write(tsr, 1, 0xfe);
+    CHECK(b.run(4) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 504 && (b.peek(tsr, 1) & 1));
+    // The caller's overflow between two counts, and the match that follows as TCNT leaves 2.
+    b.read(tsr, 1);
+    b.write(tsr, 1, 0xfa);
+    b.write(gra, 2, 2);
+    CHECK(b.run(6) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 505);
+    CHECK(cdblock_timer_overflow(b, 0) == 0 && b.peek(tcnt, 2) == 0 && (b.peek(tsr, 1) & 4));
+    CHECK(b.run(6) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 2 && !(b.peek(tsr, 1) & 1));
+    CHECK(b.run(4) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 3 && (b.peek(tsr, 1) & 1));
+    // A stopped channel keeps its count, and goes on from it at the next count once started.
+    b.write(0x05ffff00, 1, 0x00);
+    CHECK(b.run(40) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 3);
+    b.write(0x05ffff00, 1, 0x01);
+    CHECK(b.run(6) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 4 && cdblock_clock_cycles(b) == 206);
+    // A copy taken between two counts counts on as the board does.
+    Board copy(cdblock_clone(b));
+    CHECK(b.run(30) == CDBLOCK_EXIT_BUDGET && copy.run(30) == CDBLOCK_EXIT_BUDGET);
+    CHECK(b.peek(tcnt, 2) == 12 && copy.peek(tcnt, 2) == 12);
+    // A capture between two counts takes the count as it stands.
+    b.write(0x05ffff05, 1, 0x0d); // TIOR0: capture A on falling edges
+    CHECK(b.run(9) == CDBLOCK_EXIT_BUDGET && cdblock_card_request(b, CDBLOCK_CARD_AUDIO, 1) == 1);
+    CHECK(b.peek(gra, 2) == 14 && b.peek(tcnt, 2) == 14);
+    // Compare match B as TCNT leaves GRB, at cycle 256.
+    b.write(grb, 2, 16);
+    CHECK(b.run(7) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 16 && !(b.peek(tsr, 1) & 2));
+    CHECK(b.run(4) == CDBLOCK_EXIT_BUDGET && b.peek(tcnt, 2) == 17 && (b.peek(tsr, 1) & 2));
+}
+
+void clock_dma_reads_other_channel()
+{
+    // A DMA unit on channel 0's compare match reads TCNT1, which has only added one since it
+    // started. Channel 0 counts first in a step, so the unit sees TCNT1 as the step found it.
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    b.write(0x05ffff04, 1, 0x23);       // TCR0: φ/8, cleared by GRA
+    b.write(0x05ffff0a, 2, 3);          // GRA0: a match at the fourth count, cycle 32
+    b.write(0x05ffff06, 1, 0x01);       // TIER0: IMIEA
+    b.write(0x05ffff0e, 1, 0x00);       // TCR1: φ, free running
+    b.write(0x05ffff60, 4, 0x05ffff12); // SAR2: TCNT1
+    b.write(0x05ffff64, 4, 0x0f000100); // DAR2
+    b.write(0x05ffff6a, 2, 1);          // TCR2
+    b.write(0x05ffff6e, 2, 0x0809);     // CHCR2: both fixed, IMIA0, words, DE
+    b.write(0x05ffff48, 2, 0x0001);     // DMAOR: DME
+    b.write(0x05ffff00, 1, 0x03);       // TSTR: channels 0 and 1
+    CHECK(b.run(32) == CDBLOCK_EXIT_BUDGET && b.peek(0x05ffff6a, 2) == 0);
+    CHECK(b.peek(0x0f000100, 2) == 31 && b.peek(0x05ffff12, 2) == 32);
 }
 
 void clock_modes()
@@ -433,6 +534,8 @@ const std::vector<Test> sh7034_tests = {
     {"clock: capture clear and buffer operation", clock_capture_and_buffer},
     {"clock: unmodeled counting mode", clock_unmodeled_mode},
     {"clock: periodic counter skipped far", clock_periodic_skip},
+    {"clock: a counter read and changed between its events", clock_between_events},
+    {"clock: a DMA unit reading another channel's counter", clock_dma_reads_other_channel},
     {"clock: cycles per instruction", clock_rate},
     {"clock: a DMA unit per compare match", clock_dma_per_match},
     {"clock: a burst that changes its source", clock_burst_changes_source},

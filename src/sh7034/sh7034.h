@@ -59,7 +59,16 @@ class Sh7034
     // started in TSTR counts the falling edges of its prescaled clock, φ/1, φ/2, φ/4 or φ/8.
     // Compare matches, counter clears and overflows follow, as do buffer transfers. The prescaler
     // runs from reset, an assumption: the manual does not give its phase.
-    void advance(uint64_t elapsed);
+    //
+    // A count that only adds one to TCNT is not made as its cycle passes. The channels count when
+    // the clock reaches the first count that does more, kept in timers_due, and a TCNT in between
+    // is the stored one plus the counts since timers_seen.
+    void advance(uint64_t elapsed)
+    {
+        clock += elapsed;
+        if (clock >= timers_due)
+            timers_run(elapsed);
+    }
     // The cycle at which a counting channel next sets a flag whose interrupt TIER enables, 0 for none.
     uint64_t timer_event() const;
     uint64_t cycles() const
@@ -234,6 +243,11 @@ class Sh7034
     static constexpr uint8_t not_counting = 0xff, all_channels = 0x1f;
     std::array<uint8_t, 5> shifts{};
     uint8_t stale_shifts = all_channels;
+    // The cycle through which every stored TCNT has counted, and the cycle of the first count after
+    // it that does more than add one, in any channel. A timers_due of 0 has the next advance look at
+    // the channels again: every change to what they count by leaves it, and so it is 0 while a
+    // shift is stale.
+    uint64_t timers_seen = 0, timers_due = 0;
 
     uint8_t read8(unsigned offset);
     void write8(unsigned offset, uint8_t value);
@@ -245,8 +259,25 @@ class Sh7034
     bool counting(unsigned channel, unsigned &div);
     // One count of the channel's TCNT. Returns the flags it set: IMFA, IMFB and OVF as in TSR.
     static unsigned count(Timer &tm, bool pwm, bool buffer_a, bool buffer_b);
+    // The counts from here that only add one to TCNT: those before a compare match or the overflow.
+    static uint64_t plain_counts(const Timer &tm, bool pwm);
     // Returns the TSR flags the counts set that were clear before them.
     unsigned counted(unsigned channel, uint64_t counts);
+    // The clock passed timers_due: the channels count the elapsed cycles that brought it there.
+    void timers_run(uint64_t elapsed);
+    // The stored TCNTs take the counts up to a cycle, none of which does more than add one.
+    void timers_settle(uint64_t cycle);
+    // Before a change to what a channel counts by or to its TCNT: the stored TCNTs are brought up
+    // to the clock, and the channels are looked at again as it next moves.
+    void timers_changing()
+    {
+        timers_settle(clock);
+        timers_due = 0;
+    }
+    // A channel's TCNT as it reads now.
+    uint16_t tcnt_now(unsigned channel) const;
+    // The cycle of the first count that does more than add one, with every channel's shift known.
+    uint64_t timers_next() const;
     bool buffered(unsigned channel, bool b) const;
     // PWM mode: GRA and GRB are compare registers whatever TIOR selects (section 10.4.4).
     bool pwm(unsigned channel) const

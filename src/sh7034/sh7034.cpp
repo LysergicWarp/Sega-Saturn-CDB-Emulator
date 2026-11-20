@@ -1,6 +1,7 @@
 #include "sh7034.h"
 #include "../board/board.h"
 
+#include <algorithm>
 #include <bit>
 
 namespace cdblock
@@ -48,6 +49,7 @@ void Sh7034::reset()
     clock = 0;
     itu_mode_logged = 0;
     stale_shifts = all_channels;
+    timers_seen = timers_due = 0;
     for (unsigned n = 0; n < 8; ++n)
         irq_line[n] = irq_latched[n] = false;
     // Reset values of the registers kept as plain storage, where the manual gives them.
@@ -94,7 +96,7 @@ uint8_t Sh7034::peek(unsigned o) const
     if (t >= 0)
     {
         const Timer &tm = timer[unsigned(t)];
-        const uint16_t words[] = {0, 0, tm.tcnt, tm.gra, tm.grb, tm.bra, tm.brb};
+        const uint16_t words[] = {0, 0, tcnt_now(unsigned(t)), tm.gra, tm.grb, tm.bra, tm.brb};
         switch (field)
         {
         case itu::TCR:
@@ -263,6 +265,9 @@ void Sh7034::write8(unsigned o, uint8_t v)
         auto byte = [&](uint16_t &word) {
             word = field & 1 ? uint16_t((word & 0xff00) | v) : uint16_t((word & 0x00ff) | v << 8);
         };
+        // TIER and TSR change nothing a channel counts by.
+        if (field != itu::TIER && field != itu::TSR)
+            timers_changing();
         if (field == itu::TCR)
         {
             itu_mode_logged &= uint8_t(~(1u << t));
@@ -415,16 +420,19 @@ void Sh7034::write8(unsigned o, uint8_t v)
     // 10.2).
     case TSTR:
     case TSNC:
+        timers_changing();
         regs[o] = uint8_t(v | 0xe0);
         itu_mode_logged = 0;
         stale_shifts = all_channels;
         return;
     case TMDR:
+        timers_changing();
         regs[o] = uint8_t(v | 0x80);
         itu_mode_logged = 0;
         stale_shifts = all_channels;
         return;
     case TFCR:
+        timers_changing();
         regs[o] = uint8_t(v | 0xc0);
         itu_mode_logged = 0;
         stale_shifts = all_channels;
@@ -618,6 +626,7 @@ void Sh7034::pin_pulse(unsigned channel, bool b)
     Timer &tm = timer[channel];
     const unsigned mode = io_select(tm.tior, b);
     auto capture = [&] {
+        timers_changing();
         // Buffer operation keeps the register's last value in BRA or BRB (section 10.4.8).
         if (buffered(channel, b))
             (b ? tm.brb : tm.bra) = b ? tm.grb : tm.gra;
@@ -650,6 +659,7 @@ bool Sh7034::compare_match(unsigned channel, bool b)
     // PWM mode makes GRA and GRB compare registers whatever TIOR says (section 10.4.4).
     if (!pwm(channel) && (io_select(tm.tior, b) & tior::IO2))
         return false;
+    timers_changing();
     tm.tcnt = b ? tm.grb : tm.gra;
     tm.tsr |= b ? tsr::IMFB : tsr::IMFA;
     dma_service();
@@ -659,6 +669,7 @@ bool Sh7034::compare_match(unsigned channel, bool b)
 
 void Sh7034::overflow(unsigned channel)
 {
+    timers_changing();
     timer[channel].tcnt = 0;
     timer[channel].tsr |= tsr::OVF;
     changed();
@@ -666,6 +677,7 @@ void Sh7034::overflow(unsigned channel)
 
 void Sh7034::set_counter(unsigned channel, uint16_t value)
 {
+    timers_changing();
     timer[channel].tcnt = value;
 }
 
@@ -735,6 +747,17 @@ unsigned Sh7034::count(Timer &tm, bool pwm, bool buffer_a, bool buffer_b)
     return flags;
 }
 
+uint64_t Sh7034::plain_counts(const Timer &tm, bool pwm)
+{
+    // count() does more as TCNT leaves 0xffff, or GRA or GRB set for compare match.
+    uint64_t counts = 0xffffu - tm.tcnt;
+    if (pwm || !(tm.tior & tior::IOA2))
+        counts = std::min<uint64_t>(counts, uint16_t(tm.gra - tm.tcnt));
+    if (pwm || !(tm.tior & tior::IOB2))
+        counts = std::min<uint64_t>(counts, uint16_t(tm.grb - tm.tcnt));
+    return counts;
+}
+
 unsigned Sh7034::counted(unsigned channel, uint64_t counts)
 {
     Timer &tm = timer[channel];
@@ -746,11 +769,28 @@ unsigned Sh7034::counted(unsigned channel, uint64_t counts)
     for (unsigned n = 0; n < 4; ++n)
         if (channel < 4 && request_source(dma[n].chcr) == chcr::RS_IMIA0 + channel && dma_enabled(n))
             requested = true;
+    // The counts that only add one go at once, up to each count that does more.
+    auto run = [&](uint64_t left) {
+        while (left)
+        {
+            const uint64_t plain = plain_counts(tm, mode_pwm);
+            if (plain >= left)
+            {
+                tm.tcnt = uint16_t(tm.tcnt + left);
+                break;
+            }
+            tm.tcnt = uint16_t(tm.tcnt + plain);
+            left -= plain + 1;
+            const unsigned flags = count(tm, mode_pwm, buffer_a, buffer_b);
+            raised |= flags;
+            if (flags & tsr::IMFA && requested)
+                dma_service();
+        }
+    };
     // Otherwise the flags stay set, so past two whole periods only the counter's phase matters.
     if (!requested && counts > 2 * counter_period)
     {
-        for (unsigned i = 0; i < 2 * counter_period; ++i)
-            raised |= count(tm, mode_pwm, buffer_a, buffer_b);
+        run(2 * counter_period);
         counts -= 2 * counter_period;
         const unsigned cclr = (tm.tcr & tcr::CCLR) >> tcr::CCLR_SHIFT;
         uint64_t period = counter_period;
@@ -760,20 +800,44 @@ unsigned Sh7034::counted(unsigned channel, uint64_t counts)
             period = uint64_t(tm.grb) + 1;
         counts %= period;
     }
-    for (uint64_t i = 0; i < counts; ++i)
-    {
-        const unsigned flags = count(tm, mode_pwm, buffer_a, buffer_b);
-        raised |= flags;
-        if (flags & tsr::IMFA && requested)
-            dma_service();
-    }
+    run(counts);
     return raised & ~before & tsr::FLAGS;
 }
 
-void Sh7034::advance(uint64_t elapsed)
+void Sh7034::timers_settle(uint64_t cycle)
 {
-    const uint64_t from = clock;
-    clock += elapsed;
+    if (cycle == timers_seen)
+        return;
+    for (unsigned channel = 0; channel < 5; ++channel)
+        if (const unsigned shift = shifts[channel]; shift != not_counting)
+            timer[channel].tcnt = uint16_t(timer[channel].tcnt + ((cycle >> shift) - (timers_seen >> shift)));
+    timers_seen = cycle;
+}
+
+uint16_t Sh7034::tcnt_now(unsigned channel) const
+{
+    const unsigned shift = shifts[channel];
+    const uint16_t stored = timer[channel].tcnt;
+    return shift == not_counting ? stored : uint16_t(stored + ((clock >> shift) - (timers_seen >> shift)));
+}
+
+uint64_t Sh7034::timers_next() const
+{
+    uint64_t due = ~uint64_t(0);
+    for (unsigned channel = 0; channel < 5; ++channel)
+        if (const unsigned shift = shifts[channel]; shift != not_counting)
+            due = std::min(due, ((clock >> shift) + plain_counts(timer[channel], pwm(channel)) + 1) << shift);
+    return due;
+}
+
+void Sh7034::timers_run(uint64_t elapsed)
+{
+    // The counts before this step only added one. The step's own are made a channel at a time, as
+    // the stored TCNTs stand at its start, so what a DMA unit reads or rewrites there is the same
+    // whether the earlier counts were made as their cycles passed or only now.
+    const uint64_t from = clock - elapsed;
+    timers_settle(from);
+    timers_seen = clock;
     // The prescalers divide by powers of two, so a channel's counts are the clock's shifted. A DMA
     // unit a count requests may rewrite the settings, which later channels then see at once.
     unsigned raised = 0;
@@ -792,6 +856,8 @@ void Sh7034::advance(uint64_t elapsed)
         if (counts)
             raised |= counted(channel, counts);
     }
+    // Before the DMAC's turn, whose unit may change what a channel counts by.
+    timers_due = stale_shifts ? 0 : timers_next();
     // Only a flag newly set changes what the DMAC and the interrupt controller see.
     if (raised)
     {
@@ -810,9 +876,17 @@ uint64_t Sh7034::timer_event() const
         if (!div || !enabled)
             continue;
         Timer tm = timer[channel];
+        tm.tcnt = tcnt_now(channel);
         const bool mode_pwm = pwm(channel), buffer_a = buffered(channel, false), buffer_b = buffered(channel, true);
-        // Any enabled event comes within a period.
-        for (uint64_t k = 1; k <= counter_period + 1; ++k)
+        // Any enabled event comes within a period. k is the count looked at, each one that does
+        // more than add one in turn.
+        for (uint64_t k = 0;;)
+        {
+            const uint64_t plain = plain_counts(tm, mode_pwm);
+            k += plain + 1;
+            if (k > counter_period + 1)
+                break;
+            tm.tcnt = uint16_t(tm.tcnt + plain);
             if (count(tm, mode_pwm, buffer_a, buffer_b) & enabled)
             {
                 const uint64_t until = div - clock % div + (k - 1) * div;
@@ -820,6 +894,7 @@ uint64_t Sh7034::timer_event() const
                     best = until;
                 break;
             }
+        }
     }
     return best ? clock + best : 0;
 }
