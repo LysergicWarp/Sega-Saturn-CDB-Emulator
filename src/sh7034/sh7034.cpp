@@ -1,5 +1,6 @@
 #include "sh7034.h"
 #include "../board/board.h"
+#include "../state.h"
 
 #include <algorithm>
 #include <bit>
@@ -71,6 +72,83 @@ void Sh7034::reset()
     regs[RTCOR + 1] = 0xff;
     regs[CASCR] = 0x5f;
     regs[CASCR + 1] = 0xff;
+}
+
+void Sh7034::exchange(StateIo &io)
+{
+    io.bytes(regs);
+    for (unsigned channel = 0; channel < 5; ++channel)
+    {
+        Timer &tm = timer[channel];
+        io.u8(tm.tcr);
+        io.u8(tm.tior);
+        io.u8(tm.tier);
+        io.u8(tm.tsr);
+        io.u8(tm.read_ones);
+        uint16_t tcnt = io.loading() ? tm.tcnt : tcnt_now(channel);
+        io.u16(tcnt);
+        if (io.loading())
+            tm.tcnt = tcnt;
+        io.u16(tm.gra);
+        io.u16(tm.grb);
+        io.u16(tm.bra);
+        io.u16(tm.brb);
+    }
+    for (Channel &c : dma)
+    {
+        io.u32(c.sar);
+        io.u32(c.dar);
+        io.u16(c.tcr);
+        io.u16(c.chcr);
+        io.flag(c.te_read);
+    }
+    io.u16(dmaor);
+    io.u8(dmaor_read_ones);
+    io.flag(dma_fault);
+    io.u8(fault_channel);
+    io.u32(fault_address);
+    io.flag(user_break);
+    io.u8(sci0.smr);
+    io.u8(sci0.brr);
+    io.u8(sci0.scr);
+    io.u8(sci0.tdr);
+    io.u8(sci0.ssr);
+    io.u8(sci0.rdr);
+    io.u8(sci0.read_ones);
+    io.flag(sci0.transmitting);
+    io.u64(sci0.end);
+    io.u8(sci0.incoming);
+    io.flag(sci0.mode_logged);
+    io.u8(sci1.smr);
+    io.u8(sci1.brr);
+    io.u8(sci1.scr);
+    io.u8(sci1.tdr);
+    io.u8(sci1.ssr);
+    io.u8(sci1.rdr);
+    io.u8(sci1.read_ones);
+    io.u64(sci1.tdre_check);
+    io.u64(sci1.end);
+    io.flag(sci1.queued);
+    io.u64(sci1.queued_tdre_check);
+    io.u64(sci1.queued_length);
+    io.flag(sci1.mode_logged);
+    for (unsigned n = 0; n < 8; ++n)
+    {
+        io.flag(irq_line[n]);
+        io.flag(irq_latched[n]);
+    }
+    io.u64(clock);
+    io.u8(itu_mode_logged);
+    if (io.loading())
+    {
+        // The DMAC serves no request now, which a transfer that failed the board may have left
+        // set. The channels are found again as the clock next moves, from the TCNTs as they read
+        // now.
+        servicing = false;
+        stale_shifts = all_channels;
+        timers_seen = clock;
+        timers_due = 0;
+    }
 }
 
 int Sh7034::timer_at(unsigned offset, unsigned &field)

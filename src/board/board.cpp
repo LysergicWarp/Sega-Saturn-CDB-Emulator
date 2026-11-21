@@ -1,4 +1,5 @@
 #include "board.h"
+#include "../state.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -171,8 +172,138 @@ Board::Board(std::vector<uint8_t> rom_image, BoardOptions board_options)
       drive_(std::make_unique<SilentDrive>()), covered(all_halves, 0)
 {
     options.card_rom.clear();
+    rom_sum = crc32(rom.data(), rom.size());
     test_grounded = options.test_low;
     reset();
+}
+
+namespace
+{
+
+// The state format this library writes and reads, and the size of what a state starts with: the
+// version, the state's size and the CRC-32 of the rest.
+constexpr uint32_t state_version = 1;
+constexpr size_t state_start = 4 + 8 + 4;
+
+}
+
+size_t Board::save_state(uint8_t *out)
+{
+    StateIo io = StateIo::writer(out);
+    uint32_t version = state_version, sum = 0;
+    uint64_t size = 0;
+    io.u32(version);
+    io.u64(size);
+    io.u32(sum);
+    identify(io);
+    exchange(io);
+    if (out)
+    {
+        // The size and the CRC-32, now that the bytes are there.
+        size = io.position();
+        sum = crc32(out + state_start, io.position() - state_start);
+        StateIo start = StateIo::writer(out + 4);
+        start.u64(size);
+        start.u32(sum);
+    }
+    return io.position();
+}
+
+void Board::load_state(const uint8_t *in, size_t size)
+{
+    StateIo io = StateIo::reader(in, size);
+    uint32_t version = 0, sum = 0;
+    uint64_t length = 0;
+    io.u32(version);
+    if (version != state_version)
+        throw StateError("the state has format version " + std::to_string(version) +
+                         ", and this library reads version " + std::to_string(state_version));
+    io.u64(length);
+    io.u32(sum);
+    if (length != size)
+        throw StateError("the state is " + std::to_string(length) + " bytes long, and " + std::to_string(size) +
+                         " were given");
+    if (crc32(in + state_start, size - state_start) != sum)
+        throw StateError("the state's bytes do not match its CRC-32");
+    identify(io);
+    // The parts take their fields in place, so a state refused part way is undone from the bytes
+    // of the state the board had.
+    StateIo sizing = StateIo::writer(nullptr);
+    exchange(sizing);
+    std::vector<uint8_t> before(sizing.position());
+    StateIo keep = StateIo::writer(before.data());
+    exchange(keep);
+    try
+    {
+        exchange(io);
+        if (io.left())
+            throw StateError("the state has bytes after its last field");
+    }
+    catch (...)
+    {
+        try
+        {
+            StateIo undo = StateIo::reader(before.data(), before.size());
+            exchange(undo);
+        }
+        catch (...)
+        {
+            // Only memory running out stops the undo. What the board then holds is no board's state.
+            failed = true;
+            throw std::runtime_error("a refused state could not be undone, and the board needs a reset");
+        }
+        throw;
+    }
+}
+
+void Board::identify(StateIo &io)
+{
+    io.same(rom_sum, "another ROM");
+    card_.identify(io);
+    io.same(uint32_t(options.test_low) | uint32_t(options.pc0_high) << 1 | uint32_t(options.probe_mirror) << 2 |
+                uint32_t(options.device_timing) << 3 | uint32_t(options.clock) << 4,
+            "other options");
+    io.same(options.cycles_per_instruction, "other options");
+    drive_.drive->identify(io);
+}
+
+void Board::exchange(StateIo &io)
+{
+    io.bytes(ram.data(), ram.size());
+    io.bytes(buffer.data(), buffer.size());
+    io.bytes(probe, sizeof probe);
+    cpu.exchange(io);
+    sh7034_.exchange(io);
+    iface.exchange(io);
+    // A board without a card has no card state: the memory and the words the caller gave it are
+    // out of the SH-1's reach there.
+    if (card_.present())
+        card_.exchange(io);
+    link_.exchange(io);
+    serial_.exchange(io);
+    drive_.drive->exchange(io);
+    io.u64(executed);
+    io.u64(next_card_tick);
+    io.u32(current_pc);
+    // A CPU address error not yet taken, the text of the last one, and the entry of one taken.
+    io.flag(cpu_fault);
+    io.text(fault_text);
+    io.flag(in_fault_entry);
+    io.flag(test_grounded);
+    // A failed board, with the error that failed it.
+    io.flag(failed);
+    std::string reason = failed ? error : std::string();
+    io.text(reason);
+    if (!io.loading())
+        return;
+    error = reason;
+    // A write stop's hit that a failed run left is dropped, and the next device event is found
+    // again.
+    run_.reset();
+    drive_due = drive_.drive->due();
+    // The drive's next action lies ahead of the clock, on every board that has not failed.
+    io.require(failed || !drive_due || drive_due > sh7034_.cycles(), "time of the drive's next action");
+    events_moved();
 }
 
 std::unique_ptr<Board> Board::clone() const

@@ -11,6 +11,7 @@ namespace cdblock
 {
 
 class Board;
+class StateIo;
 
 class SerialLine
 {
@@ -25,6 +26,8 @@ class SerialLine
     }
     // A reset drops the bytes not yet delivered.
     void reset();
+    // The line's part of a board's state: the bytes still to come and the one on the line.
+    void exchange(StateIo &io);
     // Bytes to send after those it has.
     void send(const uint8_t *bytes, size_t count);
     // The bytes it has yet to deliver, the serial frame on the line among them until its sample.

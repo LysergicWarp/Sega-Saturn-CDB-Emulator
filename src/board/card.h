@@ -30,6 +30,7 @@ namespace cdblock
 {
 
 class Board;
+class StateIo;
 
 class Card
 {
@@ -49,6 +50,11 @@ class Card
         return !rom.empty();
     }
     void reset();
+    // The card's part of a board's state: its memory, registers and the words the caller gave. The
+    // ROM is not in it.
+    void exchange(StateIo &io);
+    // What a state is saved from: whether there is a card, and its ROM's CRC-32.
+    void identify(StateIo &io) const;
     // The card's own turn under device timing.
     void tick();
 
@@ -80,6 +86,7 @@ class Card
   private:
     Board *board;
     std::vector<uint8_t> rom;
+    uint32_t rom_sum = 0;
     std::map<uint32_t, uint16_t> plain;
     std::deque<uint16_t> status;
     std::map<uint16_t, uint16_t> indexed;

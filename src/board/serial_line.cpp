@@ -1,4 +1,5 @@
 #include "serial_line.h"
+#include "../state.h"
 #include "board.h"
 
 namespace cdblock
@@ -8,6 +9,14 @@ void SerialLine::reset()
 {
     queue.clear();
     sample = end = 0;
+}
+
+void SerialLine::exchange(StateIo &io)
+{
+    io.each(queue, 1, [&](uint8_t &waiting) { io.u8(waiting); });
+    io.u8(byte);
+    io.u64(sample);
+    io.u64(end);
 }
 
 void SerialLine::send(const uint8_t *bytes, size_t count)

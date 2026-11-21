@@ -22,6 +22,7 @@ namespace cdblock
 {
 
 class Board;
+class StateIo;
 
 class Interface
 {
@@ -40,6 +41,8 @@ class Interface
         board = &owner;
     }
     void reset();
+    // The chip's part of a board's state.
+    void exchange(StateIo &io);
     // DREQ1 under device timing: channel 1 moves words while the FIFO allows.
     void service();
 

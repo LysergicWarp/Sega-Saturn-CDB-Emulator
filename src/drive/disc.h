@@ -197,6 +197,10 @@ class DiscDrive final : public Drive
     {
         return std::make_unique<DiscDrive>(*this);
     }
+    // The drive's kind and settings.
+    void identify(StateIo &io) const override;
+    // The disc, the tray and where the drive is. The providers stay as the caller set them.
+    void exchange(StateIo &io) override;
     bool link_frame(LinkFrame &) override
     {
         return false;

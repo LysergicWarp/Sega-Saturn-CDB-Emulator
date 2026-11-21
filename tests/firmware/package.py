@@ -41,6 +41,9 @@ known revision: strict, the clock skipping on at the profile's idle loop.
   the lengths and tracks refused.
 - CD audio on CDB105: an audio play through 10 gives the audio sink the track's sectors as the disc
   holds them, each at the decoder input too, and DEMP follows the track's pre-emphasis bit.
+- A state on CDB105: saved during a read through 10 and loaded into a new board, which ends the
+  read as the first board does and gives the host the same sectors. A board with another drive
+  refuses it.
 
 The only device events raised here are the host's commands and transfers. The card, the timers and
 the drive act on their own.
@@ -111,6 +114,8 @@ PREGAP_BEFORE, PREGAP_AFTER = 10, 40
 PRE_EMPHASIS_TRACK, AUDIO_MARGIN, PLAY_OVERSHOOT = 0x11, 16, 1
 # PB6, the de-emphasis output DEMP: bit 6 of port B's low byte.
 PORT_B, DEMP = 0x05FFFFC3, 0x40
+# The state case's read, and the sectors of it the drive has handed over when the state is saved.
+STATE_FRAME_ADDRESS, STATE_SECTORS, STATE_SAVED = 2000, 12, 5
 
 
 class ProviderStop(Exception):
@@ -987,6 +992,77 @@ def check_audio(suite, dumps):
         each.close()
 
 
+def check_state(suite, dumps):
+    """A state saved during a read through 10, with sectors of the read still to come, and loaded
+    into a new board with the same drive: the state brings the disc. Both boards end the read at
+    the same instruction and cycle, and the host gets the read's sectors from each. A board with
+    another drive refuses the state and stays as it was."""
+    case = suite.case("cdb105 state")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    data = b"".join(f"sector {STATE_FRAME_ADDRESS + k}".encode().ljust(DATA, b"\0") for k in range(STATE_SECTORS))
+    disc = Disc(image, header=None)
+    disc.write(STATE_FRAME_ADDRESS, data)
+    boards = []
+
+    def made():
+        bd = board(image, flags=HARNESS_FLAGS)
+        strict.apply(bd, profile, None)
+        boards.append(bd)
+        return bd
+
+    def rest(bd):
+        """The read's end on bd and its sectors as the host gets them, with where the board is then."""
+        host = Host(bd, idle=profile.IDLE)
+        host.wait_for(PEND, "drive read")
+        sectors = host.command([0x5100, 0, 0, 0], name="51 get sector number")[3]
+        got = host.get(0, 0, sectors, sectors * DATA // 2)
+        return sectors, b"".join(word.to_bytes(2, "big") for word in got), bd.instructions, bd.cycles
+
+    bd = made()
+    try:
+        host = Host(bd, idle=profile.IDLE)
+        host.boot()
+        drive = Drive(host)
+        drive.insert(disc)
+        case.equal(drive.authenticate(CHECK_PARTITION) & 0xFF, 2, "E1's result")
+        # The read as Drive.read_sectors starts it, run on until the drive has handed over the first
+        # of its sectors.
+        host.command([0x3000, 0, 0, 0], ESEL, "30 connect drive")
+        bd.host_clear_flags(0xFFFF & ~PEND)
+        host.command([0x1080 | STATE_FRAME_ADDRESS >> 16, STATE_FRAME_ADDRESS & 0xFFFF, 0x0080, STATE_SECTORS],
+                     name="10 play")
+        mark = bd.log_count()
+        host.run_until(lambda: sum(entry.address >= STATE_FRAME_ADDRESS
+                                   for entry in bd.log(binding.LOG_DRIVE_SECTOR, mark)) >= STATE_SAVED,
+                       "the read's first sectors")
+        case.check(not bd.host_flags() & PEND, "the read ended before the state was saved")
+        state = bd.save()
+        case.info["bytes"] = len(state)
+        other = made()
+        other.drive_select_disc()
+        other.load(state)
+        case.check(other.save() == state, "the board that loaded the state saves other bytes")
+        got = rest(bd)
+        case.equal(got[0], STATE_SECTORS, "sectors of the read in the partition")
+        case.check(got[1] == data, "the read's sectors did not arrive")
+        case.check(rest(other) == got, "the board that loaded the state went on otherwise")
+        case.equal(len(other.log(binding.LOG_VIOLATION)), 0, "violations on the board that loaded the state")
+        # A board that kept the silent drive refuses the state.
+        silent = made()
+        before = silent.save()
+        try:
+            silent.load(state)
+            case.check(False, "a board with another drive took the state")
+        except EmulatorError as error:
+            case.check("another drive" in str(error), f"refused with: {error}")
+        case.check(silent.save() == before, "the refused state changed the board")
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    for each in boards:
+        each.close()
+
+
 def cli_status(argv):
     output, errors = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -1078,11 +1154,12 @@ def run(context):
         check_tray_requests(suite, dumps)
         check_pregap(suite, dumps)
         check_audio(suite, dumps)
+        check_state(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray, the pregap and the "
-                   "audio: need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray, the pregap, the "
+                   "audio and the state: need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 64)
+        suite.pin("cases", len(suite.cases), 65)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:

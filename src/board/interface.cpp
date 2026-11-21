@@ -1,4 +1,5 @@
 #include "interface.h"
+#include "../state.h"
 #include "board.h"
 
 namespace cdblock
@@ -17,6 +18,28 @@ void Interface::reset()
     sector.clear();
     sector_taken = 0;
     lines();
+}
+
+void Interface::exchange(StateIo &io)
+{
+    for (uint16_t &word : regs)
+        io.u16(word);
+    for (uint16_t &word : command)
+        io.u16(word);
+    for (uint16_t &word : response)
+        io.u16(word);
+    io.u16(hirq);
+    io.each(port, 2, [&](uint16_t &word) { io.u16(word); });
+    for (uint16_t &word : storage)
+        io.u16(word);
+    io.offset(read_at, fifo_words - 1, "FIFO position");
+    io.offset(write_at, fifo_words - 1, "FIFO position");
+    io.bytes(sector);
+    io.offset(sector_taken, sector.size(), "count of sector bytes taken");
+    // IRQ6's and IRQ7's levels are in the SH7034's part. The FIFO serves no request now, which a
+    // transfer that failed the board may have left set.
+    if (io.loading())
+        servicing = false;
 }
 
 void Interface::lines()

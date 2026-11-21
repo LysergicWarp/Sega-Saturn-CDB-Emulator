@@ -1,4 +1,5 @@
 #include "card.h"
+#include "../state.h"
 #include "board.h"
 
 #include <algorithm>
@@ -35,7 +36,38 @@ Card::Card(Board &owner, std::vector<uint8_t> image) : board(&owner), rom(std::m
 {
     if (!rom.empty())
         rom.resize(rom_size, 0);
+    rom_sum = crc32(rom.data(), rom.size());
     memory.assign(memory_words, 0);
+}
+
+void Card::identify(StateIo &io) const
+{
+    io.same(present(), present() ? "no MPEG card" : "an MPEG card");
+    io.same(rom_sum, "another card ROM");
+}
+
+void Card::exchange(StateIo &io)
+{
+    io.words(memory.data(), memory.size());
+    io.map(plain, 6, [&](uint32_t &offset, uint16_t &word) {
+        io.u32(offset);
+        io.u16(word);
+    });
+    io.each(status, 2, [&](uint16_t &word) { io.u16(word); });
+    io.map(indexed, 4, [&](uint16_t &number, uint16_t &word) {
+        io.u16(number);
+        io.u16(word);
+    });
+    io.u16(picture);
+    io.u16(index);
+    io.u16(last_status);
+    io.u16(address);
+    io.u16(command);
+    io.flag(picture_set);
+    io.flag(open);
+    io.flag(video_interrupt_armed);
+    io.flag(video_interrupt_sent);
+    io.u32(pointer);
 }
 
 void Card::reset()

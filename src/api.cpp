@@ -38,6 +38,9 @@ static_assert(uint32_t(LogKind::DriveSector) == CDBLOCK_LOG_DRIVE_SECTOR);
 static_assert(uint32_t(LogKind::SerialSent) == CDBLOCK_LOG_SERIAL_SENT);
 static_assert(uint32_t(LogKind::SerialLost) == CDBLOCK_LOG_SERIAL_LOST);
 static_assert(uint32_t(LogKind::DriveAudio) == CDBLOCK_LOG_DRIVE_AUDIO);
+static_assert(int(cdblock::Drive::Kind::Silent) == CDBLOCK_DRIVE_SILENT);
+static_assert(int(cdblock::Drive::Kind::Fed) == CDBLOCK_DRIVE_FED);
+static_assert(int(cdblock::Drive::Kind::Disc) == CDBLOCK_DRIVE_DISC);
 
 struct cdblock_board
 {
@@ -170,6 +173,39 @@ cdblock_board *cdblock_clone(const cdblock_board *b)
 const char *cdblock_last_error(const cdblock_board *b)
 {
     return b ? b->board->error.c_str() : create_error.c_str();
+}
+
+size_t cdblock_state_size(cdblock_board *b)
+{
+    return b->board->save_state(nullptr);
+}
+
+int cdblock_state_save(cdblock_board *b, uint8_t *out, size_t size)
+{
+    const size_t needed = b->board->save_state(nullptr);
+    if (!out)
+        return fail(b, "no buffer given");
+    if (size < needed)
+        return fail(b,
+                    "the state takes " + std::to_string(needed) + " bytes, and the buffer has " + std::to_string(size));
+    b->board->save_state(out);
+    return 0;
+}
+
+int cdblock_state_load(cdblock_board *b, const uint8_t *in, size_t size)
+{
+    if (!in)
+        return fail(b, "no state given");
+    // A state the board refuses leaves it as it was, so the board does not fail.
+    try
+    {
+        b->board->load_state(in, size);
+        return 0;
+    }
+    catch (const std::exception &e)
+    {
+        return fail(b, e.what());
+    }
 }
 
 int cdblock_reset(cdblock_board *b)

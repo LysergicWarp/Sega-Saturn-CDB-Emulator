@@ -30,6 +30,8 @@ class Link
         board = &owner;
     }
     void reset();
+    // The link's part of a board's state: the link frame that runs and how far it has come.
+    void exchange(StateIo &io);
     bool running() const
     {
         return active;
