@@ -17,16 +17,6 @@ uint8_t bcd(uint32_t value)
     return uint8_t((value / 10) << 4 | value % 10);
 }
 
-// SCI0 and ITU3 as the firmware sets them for the link: clocked synchronous at 50,000 bit/s,
-// transmitting and receiving, and COMREQ captured.
-void sci0(const Board &b)
-{
-    b.write(0x05fffec0, 1, 0x80); // SMR0: clocked synchronous, φ
-    b.write(0x05fffec1, 1, 99);   // BRR0: 3200 cycles a byte
-    b.write(0x05fffec2, 1, 0x70); // SCR0: TE, RE and RIE, so each transfer's end is an event
-    b.write(0x05ffff23, 1, 0x50); // TIOR3: capture B on falling edges
-}
-
 // The SH-1's side of the link, a board whose SCI0 transmits and receives and whose ITU3 captures
 // COMREQ, with the disc drive.
 struct Peer
@@ -187,16 +177,6 @@ std::vector<uint8_t> q(uint8_t status, uint32_t frame_address)
     r.push_back(uint8_t(~sum));
     r.push_back(0);
     return r;
-}
-
-// DMA channel 0 from the decoder into the buffer at 0x09002000, for one sector's 1170 words.
-void arm_channel0(const Board &b)
-{
-    b.read(0x05ffff4e, 2);              // TE clears only after it reads 1
-    b.write(0x05ffff44, 4, 0x09002000); // DAR0
-    b.write(0x05ffff4a, 2, 1170);       // TCR0
-    b.write(0x05ffff4e, 2, 0x4369);     // CHCR0: from the device to memory, words, DE
-    b.write(0x05ffff48, 2, 0x0001);     // DMAOR: DME
 }
 
 void disc_drive_select()

@@ -8,6 +8,8 @@
 namespace cdblock
 {
 
+class StateIo;
+
 // What the core needs from the board it sits on.
 class Sh1Port
 {
@@ -88,6 +90,9 @@ class Sh1
     {
         return state.sleep == Sleep::Waiting;
     }
+    // The core's part of a board's state: the registers and what the boundary a run ended at
+    // carries to the next run.
+    void exchange(StateIo &io);
 
   private:
     // What a boundary leaves the loop to do: execute the instruction it fetched, start again at the

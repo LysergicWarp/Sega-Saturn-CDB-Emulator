@@ -1,4 +1,5 @@
 #include "sh1.h"
+#include "../state.h"
 
 #include <array>
 #include <initializer_list>
@@ -132,6 +133,30 @@ void Sh1::reset()
     fetched_opcode = 0;
     fetched = holding = recheck = false;
     test_irq = false;
+}
+
+void Sh1::exchange(StateIo &io)
+{
+    io.u32(state.pc);
+    io.u32(state.pr);
+    io.u32(state.sr);
+    io.u32(state.mach);
+    io.u32(state.macl);
+    for (uint32_t &r : state.r)
+        io.u32(r);
+    io.u32(state.gbr);
+    io.u32(state.vbr);
+    io.u32(state.delay);
+    io.choice(state.sleep, 3, "SLEEP state");
+    io.flag(holding);
+    io.flag(test_irq);
+    // SR has no other bits, and a delay slot follows its branch at an even PC. A slot's boundary
+    // takes no address error, so an odd PC there would be fetched from.
+    io.require(!(state.sr & ~SH_FLAGS), "SR");
+    io.require(!(state.delay && (state.pc & 1)), "PC in a delay slot");
+    // The rest is not state. A run ends at a boundary before its fetch, where the opcode the last
+    // boundary fetched has been taken and a check that holding put off is in test_irq again, and
+    // ea is each handler's own.
 }
 
 uint16_t Sh1::read_word(uint32_t address)

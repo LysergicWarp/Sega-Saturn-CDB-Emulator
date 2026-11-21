@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "../state.h"
+
 namespace cdblock
 {
 
@@ -52,6 +54,24 @@ class Drive
     virtual ~Drive() = default;
     // A copy of the drive in its current state, for a copy of the board.
     virtual std::unique_ptr<Drive> clone() const = 0;
+    // The kinds of drive, by the numbers a state names them with.
+    enum class Kind : uint8_t
+    {
+        Silent,
+        Fed,
+        Disc
+    };
+    // What a state is saved from: the drive's kind, and its settings if it has any.
+    virtual void identify(StateIo &io) const = 0;
+    // The drive's part of a board's state. What the caller gave the drive to call stays out.
+    virtual void exchange(StateIo &io) = 0;
+    static void exchange_strobes(StateIo &io, LinkFrame &strobes)
+    {
+        io.each(strobes, 2, [&](Strobe &strobe) {
+            io.flag(strobe.comsync);
+            io.u8(strobe.byte);
+        });
+    }
     // The drive's turn. True to start a link frame now, with its strobes.
     virtual bool link_frame(LinkFrame &strobes) = 0;
     // A sector reaching the decoder input on this turn: its bytes from the header on and the
@@ -116,6 +136,13 @@ class SilentDrive final : public Drive
     {
         return std::make_unique<SilentDrive>(*this);
     }
+    void identify(StateIo &io) const override
+    {
+        io.same(uint32_t(Kind::Silent), "another drive");
+    }
+    void exchange(StateIo &) override
+    {
+    }
     bool link_frame(LinkFrame &) override
     {
         return false;
@@ -129,6 +156,19 @@ class FedDrive final : public Drive
     std::unique_ptr<Drive> clone() const override
     {
         return std::make_unique<FedDrive>(*this);
+    }
+    void identify(StateIo &io) const override
+    {
+        io.same(uint32_t(Kind::Fed), "another drive");
+    }
+    // The link frames and sectors still queued.
+    void exchange(StateIo &io) override
+    {
+        io.each(link_frames, 4, [&](LinkFrame &strobes) { exchange_strobes(io, strobes); });
+        io.each(sectors, 6, [&](std::pair<std::vector<uint8_t>, uint16_t> &sector) {
+            io.bytes(sector.first);
+            io.u16(sector.second);
+        });
     }
     void queue_link_frame(LinkFrame strobes)
     {

@@ -55,6 +55,22 @@ class Board:
             copy.drive_disc_subcode_provider(self._subcodes)
         return copy
 
+    def save(self):
+        """The board's state as bytes: what a run depends on, the disc drive's disc included. Not
+        in it: the ROMs, the stops and checks, the log, coverage, the trace, the drive's providers
+        and the audio sink."""
+        size = self.lib.cdblock_state_size(self.handle)
+        state = (b.u8 * size)()
+        self._ok(self.lib.cdblock_state_save(self.handle, state, size))
+        return bytes(state)
+
+    def load(self, state):
+        """Takes on a state that save gave, of a board with the same ROM, card ROM, flags, clock
+        setting and drive. A state the board refuses raises EmulatorError and leaves the board as
+        it was. The board keeps what a state does not hold."""
+        image = (b.u8 * len(state)).from_buffer_copy(state)
+        self._ok(self.lib.cdblock_state_load(self.handle, image, len(state)))
+
     def close(self):
         if self.handle:
             self.lib.cdblock_destroy(self.handle)

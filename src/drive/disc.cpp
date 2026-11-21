@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 
@@ -111,6 +112,74 @@ const char *DiscDrive::invalid(const std::vector<Track> &list, uint32_t end)
     if (end <= list.back().start || end > last_frame_address)
         return "the lead-out lies after the last track's start and at most at 99:59:74";
     return nullptr;
+}
+
+void DiscDrive::identify(StateIo &io) const
+{
+    io.same(uint32_t(Kind::Disc), "another drive");
+    for (const uint32_t setting :
+         {config.sector_cycles, config.strobe_cycles, config.seek_cycles, config.scan_frames, config.landing_frames})
+        io.same(setting, "other drive settings");
+}
+
+void DiscDrive::exchange(StateIo &io)
+{
+    // The disc.
+    io.map(sectors, 8, [&](uint32_t &frame_address, std::vector<uint8_t> &raw) {
+        io.u32(frame_address);
+        io.bytes(raw);
+        io.require(raw.size() == raw_sector, "sector size");
+    });
+    io.map(subcodes, 4 + sizeof(Subcode), [&](uint32_t &frame_address, Subcode &symbols) {
+        io.u32(frame_address);
+        io.bytes(symbols);
+    });
+    io.each(tracks, 5, [&](Track &track) {
+        io.u32(track.start);
+        io.u8(track.control);
+    });
+    io.u32(lead_out);
+    io.require(!invalid(tracks, lead_out), "track list");
+    io.each(spans, 11, [&](Span &span) {
+        io.u32(span.start);
+        io.u32(span.end);
+        io.choice(span.state, unsigned(Sector::Unreachable) + 1, "sector state");
+        io.u16(span.status);
+    });
+    // The tray.
+    io.flag(present);
+    io.u32(unreported);
+    io.require(unreported <= open_reports, "count of open tray reports");
+    io.flag(closing);
+    // The ring seek's answer, the subcode block being sent and the subcode last taken.
+    io.u16(ring_answer.word);
+    io.bytes(ring_answer.bytes);
+    io.bytes(block);
+    io.u64(block_at);
+    io.u64(block_period);
+    io.u64(subcode_at);
+    io.u32(block_frame);
+    io.require(block_frame <= block_frames, "subcode frame");
+    io.bytes(taken_symbols);
+    io.u32(taken_address);
+    io.flag(taken);
+    // Where the drive is and what it does next.
+    const unsigned modes = unsigned(Mode::Ring) + 1;
+    io.choice(mode, modes, "drive mode");
+    io.choice(arrival, modes, "drive mode");
+    io.u32(position);
+    io.u32(target);
+    io.require(position <= last_frame_address && target <= last_frame_address, "frame address");
+    io.u64(next_tick);
+    // The drive always has a next sector period: without one it would never act again.
+    io.require(next_tick != 0, "time of the drive's next sector period");
+    io.u64(step_at);
+    io.u64(seek_until);
+    io.u32(speed);
+    io.require(speed == 1 || speed == 2, "drive speed");
+    io.u32(toc_entry);
+    io.flag(seeking);
+    io.flag(backward);
 }
 
 const DiscDrive::Span *DiscDrive::span_at(uint32_t frame_address) const

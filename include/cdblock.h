@@ -13,7 +13,8 @@
  * runs, clock advances, bus accesses and device events (host, decoder, drive, card, timer, TEST
  * pad and serial line) fail. Peeks, pokes, queries such as the CPU state, the host flags, the FIFO,
  * the clock or the log, cdblock_card_memory, the board's setup and the disc drive's tray and disc
- * still work.
+ * still work. So do the state functions: a failed board's state can be saved, and loading the state
+ * of a board that had not failed ends the failure as a reset does.
  */
 #ifndef CDBLOCK_H
 #define CDBLOCK_H
@@ -136,6 +137,39 @@ CDBLOCK_EXPORT const char *cdblock_last_error(const cdblock_board *board);
 /* Power-on reset of the CPU and devices. Memory keeps its contents, which hardware does not
  * guarantee across a reset. */
 CDBLOCK_EXPORT int cdblock_reset(cdblock_board *board);
+
+/* A board's state as bytes, for a host's save states.
+ * - A state holds what a run depends on: the CPU, the RAM, the buffer, the on-chip modules, the
+ *   interface chip, the MPEG card with its memory, the drive link, the serial line, the drive, the
+ *   clock and the instruction count. A failed board's state loads as failed, with the text
+ *   cdblock_last_error gave when it was saved.
+ * - The disc drive's state has its disc: the tracks, the sectors, subcode and sector states given,
+ *   the tray and whether a disc is in. A caller that serves its disc through the providers saves
+ *   little there. The fed drive's has the link frames and sectors still queued.
+ * - A state starts with its format version, its size and the CRC-32 of the rest, then names what
+ *   it was saved from: the ROM and the card ROM by their CRC-32, the options and the drive with
+ *   its settings. cdblock_state_load refuses a state whose version, size or CRC does not fit,
+ *   one saved from a board that differs in any of those, and one with a field outside its range.
+ *   A refused state leaves the board as it was, and does not fail it.
+ * - The range checks keep a made-up state from taking the board outside its memory and tables.
+ *   They do not make it a state a run leads to: the board goes on from what it was given, as from
+ *   memory contents a caller poked.
+ * - Not in a state: the ROMs, cdblock_set_lenient, the stops, write stops, code ranges and write
+ *   areas, the log with its kinds and watches, coverage, the trace, the providers and the audio
+ *   sink. A load leaves the board's own of each in place. A board without a card has no card state:
+ *   what cdblock_card_memory and the card's words were given there is not saved.
+ * - cdblock_state_size gives the size of the state as the board is now. It changes with what the
+ *   board holds: the words in the FIFO, a sector at the decoder input, a link frame that runs, the
+ *   bytes on the serial line, the words the card was given, the drive's queues, the disc's
+ *   contents and the text of an address error or a failure. cdblock_state_save
+ *   writes that many bytes to out, and fails when size is smaller. cdblock_state_load takes size
+ *   as the state's own size, to the byte.
+ * - The bytes are the same on every platform, and a board that loads a state saves the same bytes
+ *   again. A state loads only in a library with the same format version.
+ * - Save and load between calls, not inside a provider or the audio sink. */
+CDBLOCK_EXPORT size_t cdblock_state_size(cdblock_board *board);
+CDBLOCK_EXPORT int cdblock_state_save(cdblock_board *board, uint8_t *out, size_t size);
+CDBLOCK_EXPORT int cdblock_state_load(cdblock_board *board, const uint8_t *in, size_t size);
 
 /* Running. cdblock_run stops before the instruction at a stop address, its first boundary included,
  * so a run that starts on a stop returns at once, unless an interrupt is accepted at that boundary
@@ -365,7 +399,8 @@ CDBLOCK_EXPORT int cdblock_drive_disc_sector_provider(cdblock_board *board, cdbl
  *   in, a paused drive's too, and for each block it starts, once for a sector it reports and then
  *   reads. The Q it leaves there also says whether the drive plays the sector as audio. A drive
  *   that holds a position asks once for it, and again after subcode is written, a provider is set,
- *   the tray closes or the board is reset. It follows the sector provider's rules: a nonzero return
+ *   the tray closes or the board is reset. A state holds the subcode the drive took last, so a
+ *   load alone does not make it ask. It follows the sector provider's rules: a nonzero return
  *   fails the board, at a report as at a block, it runs inside the call that ran the drive, must
  *   not change the board, and goes with the drive.
  * - The fed drive sends no subcode: its caller raises the flags and sets the symbol word, with

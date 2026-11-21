@@ -117,6 +117,9 @@ belongs to one board and reaches the others through it.
 | `Drive`, `src/drive/` | The drive, silent, fed by the caller or the disc drive | Turns the caller gives, or `DrivePort` for a drive that keeps its own time |
 | `RunControl`, `Logbook`, `src/board/` | Stops and the strict checks' ranges, the log and the trace | Called by the board |
 
+Each part lists the fields of its [saved state](#states) once, in its `exchange`, and a `StateIo`
+(`src/state.h`) writes them or reads them back.
+
 One instruction, from the loop in `Sh1::run`:
 
 1. `Sh1::before_instruction` calls `Board::boundary`, where `RunControl` says whether the run ends
@@ -394,6 +397,8 @@ The [CD-block SH-1 demo](https://github.com/LysergicWarp/Sega-Saturn-CDblock-SH1
 - `cdblock_coverage` lists the PCs that have executed in a range, by canonical address.
 - `cdblock_clone` makes a new board in another's state, so a caller can go on from one state more
   than once, mainly for tests that start from a booted board.
+- `cdblock_state_save` and `cdblock_state_load` give a board's state as bytes and take one back,
+  for a host's save states ([states](#states)).
 - `cdblock_add_write_stop` ends a run after a CPU write to a range, for a caller that waits on what
   the SH-1 writes, as a host waits on CR1..CR4 and its interrupt flags.
 
@@ -743,6 +748,66 @@ Here the flag never sets, so a `SEGASYSTEM` disc never opens the any-ID gate tha
 its result
 ([classification](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/disc-authentication.md#classification)).
 
+## States
+
+`cdblock_state_size`, `cdblock_state_save` and `cdblock_state_load` give a board's state as bytes
+and take one back, so a host can keep the CD block in its save states.
+
+```c
+size_t size = cdblock_state_size(board);
+uint8_t *state = malloc(size);
+cdblock_state_save(board, state, size);
+/* the board runs on */
+if (cdblock_state_load(board, state, size) != 0) puts(cdblock_last_error(board));
+```
+
+What a state holds:
+
+- What a run depends on: the CPU, the RAM, the buffer, the on-chip modules, the interface chip, the
+  MPEG card with its memory, the drive link, the serial line, the drive, the clock and the
+  instruction count.
+- The disc drive's disc: the tracks, the sectors, subcode and sector states given, the tray and
+  whether a disc is in. A disc served through the providers adds little. The fed drive's state has
+  the link frames and sectors still queued.
+- A failed board's state loads as failed, with the text `cdblock_last_error` gave when it was saved.
+  Loading the state of a board that had not failed ends a failure, as a reset does.
+
+What it leaves out:
+
+- The ROMs, `cdblock_set_lenient`, the stops, write stops, code ranges and write areas, the log with
+  its kinds and watches, coverage, the trace, the drive's providers and the audio sink.
+- A load leaves the board's own of each in place, so a host sets its providers and sink once.
+- A board without a card has no card state. What `cdblock_card_memory`, `cdblock_card_push_status`,
+  `cdblock_card_set_picture` and `cdblock_card_set_indexed` were given there is not saved.
+
+The bytes:
+
+- A state starts with its format version, its size and the CRC-32 of the rest. Then it names what
+  it was saved from: the ROM and the card ROM by their CRC-32, the options and the drive with its
+  settings.
+- It takes about 530 KB, and about 1050 KB with an MPEG card, whose memory is 512 KB. The size
+  follows what the board holds, so ask `cdblock_state_size` before each save.
+- The bytes are the same on every platform, and a board that loads a state saves the same bytes
+  again.
+- The format version is 1. A state loads only in a library with the same version.
+
+Loading:
+
+- Make the board as it was made for the save, select the same drive with the same settings, then
+  load.
+- A load refuses a state of another format version, one whose size or CRC-32 does not fit its
+  bytes, one saved from a board that differs in what the state names, and one with a field outside
+  its range.
+- A refused state leaves the board as it was, not failed, with the reason in `cdblock_last_error`.
+- The range checks keep a made-up state from taking the board outside its memory and tables. They
+  do not make it a state a run leads to: the board goes on from what it was given, as from memory
+  contents a caller poked.
+- A disc drive that holds a position does not ask the subcode provider again after a load: the
+  state holds the subcode it took last.
+- Save and load between calls, not inside a provider or the audio sink.
+
+In the Python harness `Board.save` returns the bytes and `Board.load` takes them.
+
 ## Checks
 
 Always on: unmapped accesses, writes to the mask ROM or the card ROM, instruction fetches from
@@ -770,13 +835,13 @@ has set no word there.
 
 A failed board, by a check or a drive error, refuses runs, clock advances, bus accesses and device
 events until its reset, as the state the error left is not a real board's. Queries still work, to
-see what happened.
+see what happened, and so do the state functions.
 
 ## Layout
 
 | Folder | Holds |
 | --- | --- |
-| `include/`, `src/` | The library: the C API in `cdblock.h`, its implementation by hardware in `cpu/`, `sh7034/`, `board/` and `drive/` |
+| `include/`, `src/` | The library: the C API in `cdblock.h`, its implementation by hardware in `cpu/`, `sh7034/`, `board/` and `drive/`, and the saved state's bytes in `state.h` |
 | `tests/emulator/` | The library's tests, hand-encoded SH-1 programs that need no ROM (`make test`) |
 | `cdblock/` | The [Python harness](#the-python-harness): the library's binding and the harness on it, with a profile for each known revision |
 | `examples/` | Card extensions in SH-1 assembly and the scenarios that run them ([examples](examples/README.md)) |
@@ -918,8 +983,8 @@ has that name, as on Windows.
   line, the R-W subcode of an audio play through `20` (Get Subcode), an audio play's sectors at the
   audio sink, the tray opened, closed on
   another disc and closed on none, a disc changed in one go, a board booted without a disc or with
-  its tray open, the host's requests in those states, and reads that run into the pregap of a track
-  of the other kind.
+  its tray open, the host's requests in those states, reads that run into the pregap of a track
+  of the other kind, and a state saved during a read and loaded into a new board.
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 

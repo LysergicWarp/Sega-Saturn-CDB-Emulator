@@ -17,6 +17,7 @@ namespace cdblock
 {
 
 class Board;
+class StateIo;
 
 class Sh7034
 {
@@ -31,6 +32,10 @@ class Sh7034
     }
 
     void reset();
+    // The modules' part of a board's state. Each TCNT is held as it reads at the clock, and a load
+    // has every channel looked at again, so the state does not depend on when the channels last
+    // counted.
+    void exchange(StateIo &io);
 
     // CPU accesses, offset 0..0x1ff from 0x05fffe00, size 1, 2 or 4 bytes.
     uint32_t read(unsigned offset, unsigned size);

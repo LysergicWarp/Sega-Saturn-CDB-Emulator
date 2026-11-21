@@ -21,6 +21,17 @@ void Link::reset()
     sync = true;
 }
 
+void Link::exchange(StateIo &io)
+{
+    Drive::exchange_strobes(io, strobes);
+    io.bytes(sent_bytes);
+    io.u32(done);
+    io.u32(started);
+    io.u32(finished);
+    io.flag(active);
+    io.flag(sync);
+}
+
 void Link::start(Drive::LinkFrame link_frame)
 {
     strobes = std::move(link_frame);
@@ -33,6 +44,14 @@ unsigned Link::step()
 {
     if (!active)
         return 0;
+    // A link frame past its last event has none left, and ends here. A board that failed inside
+    // that event holds one, and so may a state loaded from it.
+    if (done > strobes.size())
+    {
+        active = false;
+        sync = true;
+        return 0;
+    }
     const unsigned k = ++done, n = unsigned(strobes.size());
     // The transfer the previous strobe started ends with the drive's byte for it. On a timed link
     // it ended by itself: one still running when the drive moves on had the drive's byte change

@@ -108,6 +108,26 @@ inline bool contains(const std::string &text, const char *part)
 // A host command for the tests that only need the interface's command flag raised.
 inline constexpr uint16_t command[4] = {0x0100, 0, 0, 0};
 
+// SCI0 and ITU3 as the firmware sets them for the link: clocked synchronous at 50,000 bit/s,
+// transmitting and receiving, and COMREQ captured.
+inline void sci0(const Board &b)
+{
+    b.write(0x05fffec0, 1, 0x80); // SMR0: clocked synchronous, φ
+    b.write(0x05fffec1, 1, 99);   // BRR0: 3200 cycles a byte
+    b.write(0x05fffec2, 1, 0x70); // SCR0: TE, RE and RIE, so each transfer's end is an event
+    b.write(0x05ffff23, 1, 0x50); // TIOR3: capture B on falling edges
+}
+
+// DMA channel 0 from the decoder into the buffer at 0x09002000, for one sector's 1170 words.
+inline void arm_channel0(const Board &b)
+{
+    b.read(0x05ffff4e, 2);              // TE clears only after it reads 1
+    b.write(0x05ffff44, 4, 0x09002000); // DAR0
+    b.write(0x05ffff4a, 2, 1170);       // TCR0
+    b.write(0x05ffff4e, 2, 0x4369);     // CHCR0: from the device to memory, words, DE
+    b.write(0x05ffff48, 2, 0x0001);     // DMAOR: DME
+}
+
 struct Test
 {
     const char *name;
@@ -115,4 +135,4 @@ struct Test
 };
 
 extern const std::vector<Test> cpu_tests, interrupt_tests, exception_tests, sh7034_tests, serial_tests, board_tests,
-    timing_tests, drive_tests, api_tests;
+    timing_tests, drive_tests, api_tests, state_tests;

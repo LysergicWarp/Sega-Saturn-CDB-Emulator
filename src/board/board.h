@@ -49,6 +49,22 @@ class Board final : public Sh1Port, public DrivePort
     // the drive, checks, stops, watches, coverage and log. The trace stays with this board.
     std::unique_ptr<Board> clone() const;
 
+    // The board's state as bytes: a header, then what a run depends on. That is the CPU, the RAM,
+    // the buffer, the on-chip modules, the interface chip, the card with its memory, the link, the
+    // serial line, the drive with its disc, the clock and whether the board failed.
+    // - The header is the format's version, the state's size, the CRC-32 of what follows it, and
+    //   what the state was saved from: the ROM and the card ROM by their CRC-32, the options and
+    //   the drive with its settings.
+    // - Not in it: the ROMs, lenient, the stops and checks, the log with its kinds and watches,
+    //   coverage, the trace, the drive's providers and the audio sink. A load leaves the board's
+    //   own of each.
+    // save_state writes the state to out and returns its size, or with no out only the size.
+    size_t save_state(uint8_t *out);
+    // Takes the state on, or throws StateError and leaves the board as it was: for another
+    // version, a size or CRC that does not fit the bytes, a board that differs in what the state
+    // was saved from, or a value the board cannot hold.
+    void load_state(const uint8_t *in, size_t size);
+
     void reset();
     // Passes at most budget instruction boundaries, until a stop address, the boundary after a write
     // stop or a SLEEP with nothing to accept. An illegal instruction's boundary counts though the
@@ -350,6 +366,8 @@ class Board final : public Sh1Port, public DrivePort
 
     BoardOptions options;
     std::vector<uint8_t> rom, ram, buffer;
+    // The ROM's CRC-32, which a state names it by.
+    uint32_t rom_sum = 0;
     uint8_t probe[2] = {};
     Sh1 cpu;
     Sh7034 sh7034_;
@@ -395,6 +413,10 @@ class Board final : public Sh1Port, public DrivePort
     }
     void check_write(uint32_t address, unsigned size, Master master);
     void decoder_input(const std::vector<uint8_t> &bytes, uint16_t status);
+    // A state's header after its size and CRC: what it was saved from.
+    void identify(StateIo &io);
+    // A state's body: each part's fields in turn, written or read.
+    void exchange(StateIo &io);
     [[noreturn]] void fail(const std::string &text) const;
     static size_t pc_index(uint32_t pc);
 };
