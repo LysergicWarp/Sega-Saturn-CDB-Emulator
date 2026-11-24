@@ -9,10 +9,11 @@ loop, 97 a sector besides the sector itself. Nothing here names a firmware addre
 loop needs a profile: on any other dump the disc operations are not supported.
 
 By default the disc has one data track from 00:02:00 with a Saturn header at its first frame
-address. Its tracks, their pregaps, the header's frame address, sectors that are missing or
-unreadable and each sector's subcode can be set. A pregap is the Q of its sectors, which the drive
-reports: without one a track's reports start at index 1. It always holds disc authentication's ring
-at every check position, the sectors that scripts/ring/make.py builds from the dump's own tables.
+address. Its tracks, their pregaps and index marks, the header's frame address, sectors that are
+missing or unreadable and each sector's subcode can be set. A pregap or an index mark is the Q of
+its sectors, which the drive reports: without one a track's reports start at index 1 and stay
+there. It always holds disc authentication's ring at every check position, the sectors that
+scripts/ring/make.py builds from the dump's own tables.
 Which positions a check reads follows from the ITU4 count when the firmware recognizes the header,
 so the ring is there for any count, as on a pressed disc. The drive answers each authentication
 seek as Yabause's emulation does, with values that pass the seek checks, unless the disc has seek
@@ -174,8 +175,10 @@ class Disc:
         self.states = []
         self.sectors = {}
         self.subcodes = {}
-        # Each pregap's frames by its track's number.
+        # Each pregap's frames by its track's number, and each track's index marks, {index: first
+        # frame address}.
         self.pregaps = {}
+        self.indexes = {}
         if header is not None:
             self.sectors[header] = sector(header, data=IDENTIFIER + MAKER + PRODUCT)
         for row in range(RING_ROWS):
@@ -236,20 +239,58 @@ class Disc:
             raise ValueError(f"a pregap of {frames} frames does not fit in the track before track {track}")
         self.pregaps[track] = frames
 
+    def _end(self, track):
+        """The frame address after track number track: the next track's start, or the lead-out."""
+        return self.tracks[track][0] if track < len(self.tracks) else self.lead_out
+
+    def index(self, track, number, frame_address):
+        """Track number track gets index number, 2 to 99, from frame_address on: the sectors from
+        there to its next index mark, or to the track's end, hold a Q that names the track at that
+        index, with its control/ADR byte and the time from the track's start. The drive reports
+        that Q there, and goes to the index's first sector for a seek or play that asks for it. The
+        marks of a track follow their numbers, each after the track's start, and a pregap takes the
+        frames it covers. The Q takes bit 6 of those sectors' symbols and leaves subcode written
+        there its other bits. Every sector from the mark to the track's end so holds subcode, which
+        on a long track makes the disc slow to go in and a saved state large. Before the disc goes
+        in, as write."""
+        if not 1 <= track <= len(self.tracks):
+            raise ValueError(f"an index mark goes in track 1 to {len(self.tracks)}, not {track}")
+        if not 2 <= number <= 99:
+            raise ValueError(f"an index mark is index 2 to 99, not {number}")
+        if not self.tracks[track - 1][0] < frame_address < self._end(track):
+            raise ValueError(f"index {number} at {frame_address} does not lie in track {track} after its start")
+        marks = dict(self.indexes.get(track, {}))
+        marks[number] = frame_address
+        ordered = sorted(marks.items())
+        if any(at >= later for (_, at), (_, later) in zip(ordered, ordered[1:])):
+            raise ValueError(f"index {number} at {frame_address} does not follow the order of track {track}'s marks")
+        self.indexes[track] = marks
+
     def subcode(self):
-        """Each sector's subcode as the drive takes it: the symbols written, and the Q of the
-        pregaps in bit 6."""
+        """Each sector's subcode as the drive takes it: the symbols written, and the Q of the index
+        marks and then the pregaps in bit 6."""
         merged = dict(self.subcodes)
+
+        def put(frame_address, q):
+            written = merged.get(frame_address, bytes(SUBCODE))
+            merged[frame_address] = bytes(symbol & 0xBF | bit for symbol, bit in zip(written, q_symbols(q)))
+
+        for track, marks in self.indexes.items():
+            start, control = self.tracks[track - 1]
+            ordered = sorted(marks.items())
+            for k, (number, first) in enumerate(ordered):
+                last = ordered[k + 1][1] if k + 1 < len(ordered) else self._end(track)
+                for frame_address in range(first, last):
+                    put(frame_address, bytes([control, _make.bcd(track), _make.bcd(number)])
+                        + _make.bcd_address(frame_address - start) + b"\0" + _make.bcd_address(frame_address))
         for track, frames in self.pregaps.items():
             start, control = self.tracks[track - 1]
             before = self.tracks[track - 2][1]
             audio_first = control & DATA_BIT and not before & DATA_BIT
             for frame_address in range(start - frames, start):
                 held = before if audio_first and start - frame_address > PREGAP else control
-                q = (bytes([held, _make.bcd(track), 0]) + _make.bcd_address(start - 1 - frame_address) + b"\0"
-                     + _make.bcd_address(frame_address))
-                written = merged.get(frame_address, bytes(SUBCODE))
-                merged[frame_address] = bytes(symbol & 0xBF | bit for symbol, bit in zip(written, q_symbols(q)))
+                put(frame_address, bytes([held, _make.bcd(track), 0]) + _make.bcd_address(start - 1 - frame_address)
+                    + b"\0" + _make.bcd_address(frame_address))
         return merged
 
     def missing(self, frame_address, count=1):

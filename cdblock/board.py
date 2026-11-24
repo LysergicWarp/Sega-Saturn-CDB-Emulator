@@ -386,11 +386,11 @@ class Board:
 
     def drive_disc_subcode_provider(self, provider):
         """provider(frame_address, symbols) sees each sector's subcode as the drive reports a
-        position in it, a paused drive's too, or starts its block, a missing sector's too: once for
-        a sector it reports and then reads. symbols is the 96 bytes the disc holds there, zeros for a
-        sector without any. It returns 96 bytes to send instead, or None to leave them. None for the
-        disc's own subcode throughout. An exception, the board and the drive as for
-        drive_disc_ring_provider."""
+        position in it, a paused drive's too, starts its block, a missing sector's too, or looks at
+        it in a search for an index: once for a sector it reports and then reads. symbols is the 96
+        bytes the disc holds there, zeros for a sector without any. It returns 96 bytes to send
+        instead, or None to leave them. None for the disc's own subcode throughout. An exception,
+        the board and the drive as for drive_disc_ring_provider."""
         callback = b.SubcodeProvider()
         if provider is not None:
             def answer(frame_address, out):

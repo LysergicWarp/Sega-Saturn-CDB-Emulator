@@ -41,6 +41,10 @@ known revision: strict, the clock skipping on at the profile's idle loop.
   the lengths and tracks refused.
 - CD audio on CDB105: an audio play through 10 gives the audio sink the track's sectors as the disc
   holds them, each at the decoder input too, and DEMP follows the track's pre-emphasis bit.
+- An audio track's index on CDB105: a play through 10 of index 2 alone plays from its first sector
+  and ends with PEND at index 3, a seek through 11 to index 3 pauses there, and a play of an index
+  the track does not hold plays nothing of it. The disc's index marks: their Q and the marks
+  refused.
 - A state on CDB105: saved during a read through 10 and loaded into a new board, which ends the
   read as the first board does and gives the host the same sectors. A board with another drive
   refuses it.
@@ -116,6 +120,10 @@ PRE_EMPHASIS_TRACK, AUDIO_MARGIN, PLAY_OVERSHOOT = 0x11, 16, 1
 PORT_B, DEMP = 0x05FFFFC3, 0x40
 # The state case's read, and the sectors of it the drive has handed over when the state is saved.
 STATE_FRAME_ADDRESS, STATE_SECTORS, STATE_SAVED = 2000, 12, 5
+# The index case's disc: the data track, the audio track with index 2 and index 3 marked, then an
+# audio track from INDEX_NEXT, whose start bounds the drive's search for an index of the track
+# before.
+INDEX_2, INDEX_3, INDEX_NEXT = 20_200, 20_300, 20_600
 
 
 class ProviderStop(Exception):
@@ -992,6 +1000,95 @@ def check_audio(suite, dumps):
         each.close()
 
 
+def check_index(suite, dumps):
+    """Plays and a seek to an index of an audio track, through 10 and 11 with track positions. The
+    firmware sends the drive's command with the track's start, the index, the next track's start
+    and the track. A play of index 2 alone plays from the index's first sector and ends with PEND
+    once a report shows index 3. A seek to index 3 pauses at its first sector. A play of an index
+    the track does not hold, nor any later one, goes to the next track's start, outside the play's
+    range, and ends with PEND having played nothing of the track, only the next track's first
+    sector as any play overshoots its end. The disc's index marks: the Q they hold, and the tracks,
+    numbers and places refused."""
+    case = suite.case("cdb105 index")
+    image, profile = dumps.rom("cdb105"), PROFILES["cdb105"]
+    bd = board(image, flags=HARNESS_FLAGS)
+    strict.apply(bd, profile, None)
+    host = Host(bd, idle=profile.IDLE)
+    disc = Disc(image, header=None, tracks=((FIRST, DATA_TRACK), (AUDIO_START, AUDIO_TRACK), (INDEX_NEXT, AUDIO_TRACK)))
+    refuses(case, lambda: disc.index(4, 2, INDEX_NEXT + 10), ValueError, "track 1 to 3", "a mark in a track not there")
+    refuses(case, lambda: disc.index(2, 1, INDEX_2), ValueError, "index 2 to 99", "a mark of index 1")
+    refuses(case, lambda: disc.index(2, 100, INDEX_2), ValueError, "index 2 to 99", "a mark of index 100")
+    refuses(case, lambda: disc.index(2, 2, AUDIO_START), ValueError, "after its start", "a mark at the track's start")
+    refuses(case, lambda: disc.index(2, 2, INDEX_NEXT), ValueError, "after its start", "a mark in the next track")
+    disc.index(2, 3, INDEX_3)
+    refuses(case, lambda: disc.index(2, 2, INDEX_3), ValueError, "order", "index 2 at index 3's place")
+    refuses(case, lambda: disc.index(2, 2, INDEX_3 + 1), ValueError, "order", "index 2 after index 3")
+    disc.index(2, 2, INDEX_2)
+    # Each index runs to the next mark, the last to the track's end, with the time from the track's
+    # start. The track's first sectors keep the Q the drive builds, of index 1.
+    held = disc.subcode()
+    case.equal([q_bytes(held[frame]).hex(" ") for frame in (INDEX_2, INDEX_3 - 1, INDEX_3, INDEX_NEXT - 1)],
+               ["01 02 02 00 02 50 00 04 29 25", "01 02 02 00 03 74 00 04 30 49",
+                "01 02 03 00 04 00 00 04 30 50", "01 02 03 00 07 74 00 04 34 49"], "the Q of the index marks")
+    case.check(INDEX_2 - 1 not in held and INDEX_NEXT not in held, "a Q written outside the marks")
+    played = []
+    bd.set_audio_sink(lambda frame_address, raw, speed: played.append(frame_address))
+
+    def commands(mark):
+        """The drive commands sent from log index mark: their 13 bytes, which the log text gives
+        before any comma, and their log text."""
+        entries = bd.log(binding.LOG_DRIVE_COMMAND, mark)
+        return [bytes.fromhex(e.text.split(",")[0].replace(" ", "")) for e in entries], [e.text for e in entries]
+
+    def track_command(sent):
+        """The frame address, index, bound, track and speed of a drive command."""
+        return [int.from_bytes(sent[1:4], "big"), sent[4], int.from_bytes(sent[5:8], "big"), sent[8], sent[10]]
+
+    def play(index, what):
+        """10 from track 2 at index to track 2 at index. Returns the sectors the sink got and the
+        drive commands sent, by two sector periods after PEND."""
+        mark, count = bd.log_count(), len(played)
+        bd.host_clear_flags(0xFFFF & ~PEND)
+        answer = host.command([0x1000, 2 << 8 | index, 0x0000, 2 << 8 | index], name="10 play")
+        if answer[0] >> 8 == REJECT:
+            raise RunError("10 play: rejected")
+        host.wait_for(PEND, what)
+        idle_for(host, 2 * SECTOR_CYCLES, "after the play")
+        return played[count:], commands(mark)
+
+    try:
+        host.boot()
+        Drive(host).insert(disc)
+        got, (sent, texts) = play(2, "the play of index 2")
+        case.equal([command[0] for command in sent], [0x06, 0x08], "the drive commands of the play of index 2")
+        if sent:
+            case.equal(track_command(sent[0]), [AUDIO_START, 2, INDEX_NEXT, 2, 1],
+                       "the frame address, index, bound, track and speed of the play of index 2")
+            case.check(texts[0].endswith(f", index 2 of track 2 at {INDEX_2}"), f"the play's log entry: {texts[0]}")
+        case.equal(got, list(range(INDEX_2, INDEX_3 + PLAY_OVERSHOOT)), "the sectors the play of index 2 played")
+
+        mark = bd.log_count()
+        host.command([0x1100, 2 << 8 | 3, 0, 0], name="11 seek")
+        host.idle_until(lambda: commands(mark)[0] and bd.host_response()[0] >> 8 & 0x0F == PAUSE, "the seek to index 3")
+        sent, _ = commands(mark)
+        case.equal([track_command(command) for command in sent], [[AUDIO_START, 3, INDEX_NEXT, 2, 1]],
+                   "the drive commands of the seek to index 3")
+        case.equal(bd.host_response()[1:], [AUDIO_TRACK << 8 | 2, 3 << 8 | INDEX_3 >> 16, INDEX_3 & 0xFFFF],
+                   "the position after the seek to index 3")
+
+        got, (sent, texts) = play(5, "the play of an index the track does not hold")
+        case.equal([command[0] for command in sent], [0x06, 0x08], "the drive commands of the play of index 5")
+        if sent:
+            case.check(texts[0].endswith(f", no index 5 of track 2, to {INDEX_NEXT}"),
+                       f"the play's log entry: {texts[0]}")
+        case.equal(got, list(range(INDEX_NEXT, INDEX_NEXT + PLAY_OVERSHOOT)), "the sectors the play of index 5 played")
+        case.info["played"] = len(played)
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error!r}")
+    case.equal(len(bd.log(binding.LOG_VIOLATION)), 0, "violations")
+    bd.close()
+
+
 def check_state(suite, dumps):
     """A state saved during a read through 10, with sectors of the read still to come, and loaded
     into a new board with the same drive: the state brings the disc. Both boards end the read at
@@ -1154,12 +1251,13 @@ def run(context):
         check_tray_requests(suite, dumps)
         check_pregap(suite, dumps)
         check_audio(suite, dumps)
+        check_index(suite, dumps)
         check_state(suite, dumps)
     else:
         suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray, the pregap, the "
-                   "audio and the state: need cdb105.bin")
+                   "audio, the index and the state: need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 65)
+        suite.pin("cases", len(suite.cases), 66)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:

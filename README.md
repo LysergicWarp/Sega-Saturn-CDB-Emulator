@@ -563,6 +563,37 @@ Seeks and reads:
 - A TOC read, pause, stop, scan or tray opening during a seek leaves the position where the seek
   started, unconfirmed.
 
+A track's index:
+
+- For a seek or play to a track's index the firmware sends `09` or `06` with the track's start in
+  bytes 1 to 3, the index in byte 4, the next track's start (the lead-out after the last track) in
+  bytes 5 to 7 and the track in byte 8, all binary
+  ([seek, read and pause](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#seek-read-and-pause)).
+  It does so for an audio track at any index and for a data track at an index above 1. For a data
+  track at index 0 or 1 it sends the frame address alone.
+- CDB105 takes its target reached once a report's track and index are at or past the ones it asked
+  for
+  ([following the position](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#following-the-position)).
+- With an index above 1 the drive goes to the first sector from the frame address in bytes 1 to 3
+  on whose Q, of ADR 1, holds the track and the index, or later ones as CDB105 compares them: a
+  later index of the track, or a later track. So with indexes 2 and 4 a play of index 3 starts at
+  index 4, and the next track's pregap counts as past any index.
+- It looks no further than the frame address in bytes 5 to 7, and without a match goes there, or to
+  the one in bytes 1 to 3 if bytes 5 to 7 do not lie past it. A play whose range ends in the asked
+  track then ends at once, and a longer one plays on from the next track.
+- The drive finds the index as it obeys the command, then seeks as to any frame address. A play
+  lands before the index and plays from it, so the sectors on the way are not played.
+- An unreachable sector on the way ends the search there, and the seek never arrives.
+- A sector without subcode holds no index above 1, so on a disc without subcode such a command goes
+  to the next track's start. A data track rarely holds one either, so there too. An index of 0 or
+  1, and other bytes 4 to 9, change nothing.
+- The log's entry for such a command ends with where the drive goes: `index 2 of track 2 at 20200`,
+  `past index 3 of track 2 at 20400, Q track 02 index 04` or `no index 5 of track 2, to 20600`. A
+  subcode provider that fails the search leaves `the search for index 2 of track 2 failed`.
+- Unconfirmed: how a real drive finds an index, whether it takes a later index or track for the one
+  asked for, what it reports and plays on the way, how long it takes (here as long as any seek),
+  and what it does without a match.
+
 Reports:
 
 - The TOC lists each track's start, then points A0 with the first track and disc type 0, A1 with
@@ -620,10 +651,11 @@ Subcode:
   when the drive leaves the read: a pause, seek, stop or scan ends the block being sent.
 - A subcode provider set with `cdblock_drive_disc_subcode_provider` serves the symbols from the
   caller, under the sector provider's rules. It is asked for each sector the drive reports a
-  position in, a paused drive's too, and for each block the drive starts, once for a sector it
-  reports and then reads. A drive that holds a position asks once for it, and again after subcode
-  is written, a provider is set, the tray closes or the board is reset. It is asked for missing
-  sectors too. The Q it gives also says whether the drive plays the sector as audio.
+  position in, a paused drive's too, for each block the drive starts, once for a sector it reports
+  and then reads, and for each sector a search for an index looks at. A drive that holds a position
+  asks once for it, and again after subcode is written, a provider is set, the tray closes, the
+  board is reset or a search looks at other sectors. It is asked for missing sectors too. The Q it
+  gives also says whether the drive plays the sector as audio.
 - Bit 6 of each symbol is the Q channel, which the drive reports over the link. The symbols go to
   the interface chip whole. The P channel is not used.
 - The fed drive sends no subcode. Its caller raises the flags and sets the symbol word.
@@ -736,9 +768,8 @@ sector. A link frame
 the SH-1 did not answer in full carries no command, and the link logs the strobes it missed.
 
 Not modeled: the drive's final byte asking for a repeat, which is always `00`, statuses `81` and
-`82`, which this drive never sends, the index and track bytes of a command, the TOC end report, a
-second session, the lead-in's own Q, and the decoder's handling of audio and its status bits beyond
-the one the caller gives.
+`82`, which this drive never sends, the TOC end report, a second session, the lead-in's own Q, and
+the decoder's handling of audio and its status bits beyond the one the caller gives.
 
 Bit 3 of a report's status, whose meaning is unknown, is always clear. Disc authentication sets its
 30-track flag only for a TOC of exactly 30 tracks whose lead-in reports are at least a quarter with
@@ -960,7 +991,8 @@ python -m cdblock --firmware dumps/cdb105.bin --card dumps/mpeg-card/vcd.bin
   waits. Any other dump runs lenient.
 - `cdblock.disc` puts a disc in the disc drive for a known revision, with disc authentication's
   ring built from the dump's own tables. Its drive opens and closes the tray and changes the disc
-  while it is open. A track of its disc takes a pregap, written as the Q of the pregap's sectors.
+  while it is open. A track of its disc takes a pregap and index marks, each written as the Q of
+  its sectors.
 
 [`payload.py`](scripts/payload/payload.py) encodes and decodes extension payloads and card ROMs.
 In [`scripts/ring/`](scripts/ring/), `ring.py` replays disc authentication's checks and `make.py`
@@ -984,7 +1016,8 @@ has that name, as on Windows.
   audio sink, the tray opened, closed on
   another disc and closed on none, a disc changed in one go, a board booted without a disc or with
   its tray open, the host's requests in those states, reads that run into the pregap of a track
-  of the other kind, and a state saved during a read and loaded into a new board.
+  of the other kind, plays and a seek to an index of an audio track, and a state saved during a
+  read and loaded into a new board.
 - `authentication`: disc authentication on the disc drive at the edges of the drive timings the
   firmware accepts, and on discs that fail it.
 

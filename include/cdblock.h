@@ -394,15 +394,26 @@ CDBLOCK_EXPORT int cdblock_drive_disc_sector_provider(cdblock_board *board, cdbl
  *   from the tracks, with no pregap but the first track's and no index above 1. Before the first
  *   track that Q's time counts down to zero in the frame before the track's start, and past the
  *   lead-out it names track aa. The TOC's reports are always built from the tracks.
+ * - A seek or play (drive commands 09 and 06) whose byte 8 names a track and whose byte 4 an index
+ *   above 1, as the firmware sends them for a track's index, goes to the first sector from its frame
+ *   address on whose Q, of ADR 1, holds that track and index or later ones: a later index of the
+ *   track, or a later track such as the next one's pregap, as the firmware takes its target reached.
+ *   The drive looks no further than the frame address in bytes 5 to 7, the next track's start, and
+ *   without a match goes there, or to the frame address in bytes 1 to 3 if bytes 5 to 7 do not lie
+ *   past it. An unreachable sector on the way ends the search there, where the seek never arrives.
+ *   A play lands before the index and plays from it. A sector without subcode holds no index above
+ *   1, and other bytes 4 to 9 change nothing. The log's entry for such a command ends with where it
+ *   goes, or with the search that failed.
  * - A subcode provider, NULL for the disc's own, is called with user, the frame address and the 96
  *   symbols the disc holds there, which it may change: for each sector the drive reports a position
- *   in, a paused drive's too, and for each block it starts, once for a sector it reports and then
- *   reads. The Q it leaves there also says whether the drive plays the sector as audio. A drive
- *   that holds a position asks once for it, and again after subcode is written, a provider is set,
- *   the tray closes or the board is reset. A state holds the subcode the drive took last, so a
- *   load alone does not make it ask. It follows the sector provider's rules: a nonzero return
- *   fails the board, at a report as at a block, it runs inside the call that ran the drive, must
- *   not change the board, and goes with the drive.
+ *   in, a paused drive's too, for each block it starts, once for a sector it reports and then reads,
+ *   and for each sector a search for an index looks at. The Q it leaves there also says whether the
+ *   drive plays the sector as audio. A drive that holds a position asks once for it, and again
+ *   after subcode is written, a provider is set, the tray closes, the board is reset or a search
+ *   looks at other sectors. A state holds the subcode the drive took last, so a load alone does
+ *   not make it ask. It follows the sector provider's rules: a nonzero return fails the board, at a
+ *   report, a block or a search, it runs inside the call that ran the drive, must not change the
+ *   board, and goes with the drive.
  * - The fed drive sends no subcode: its caller raises the flags and sets the symbol word, with
  *   cdblock_decoder_flags and cdblock_decoder_subcode.
  * - Unconfirmed: whether a real drive streams while paused, seeking or scanning, whether the
@@ -412,7 +423,9 @@ CDBLOCK_EXPORT int cdblock_drive_disc_sector_provider(cdblock_board *board, cdbl
  *   whether it reports a Q whose ADR is not 1 as it reads it, which Q a paused drive reports (here
  *   the Q of the sector it holds, in every link frame), what the Q holds past the lead-out, and
  *   which sector's Q a report carries against the sector at the decoder input (here the report
- *   after a sector carries the next sector's). */
+ *   after a sector carries the next sector's). And how a real drive finds an index, whether it
+ *   takes a later index or track for the one asked for, what it reports and plays on the way, how
+ *   long it takes (here as long as any seek), and what it does without a match. */
 CDBLOCK_EXPORT int cdblock_drive_disc_subcode(cdblock_board *board, uint32_t frame_address, const uint8_t symbols[96]);
 typedef int (*cdblock_subcode_provider)(void *user, uint32_t frame_address, uint8_t symbols[96]);
 CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdblock_subcode_provider provider,
