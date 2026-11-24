@@ -50,17 +50,20 @@ struct Peer
         stage(0);
     }
 
-    void stage(uint8_t command, uint32_t frame_address = 0, uint8_t speed = 0)
+    // A track seek or read also carries the index, the bound (the next track's start) and the
+    // track, in bytes 4 to 8.
+    void stage(uint8_t command, uint32_t frame_address = 0, uint8_t speed = 0, uint8_t index = 0, uint32_t bound = 0,
+               uint8_t track = 0)
     {
         packet = {command,
                   uint8_t(frame_address >> 16),
                   uint8_t(frame_address >> 8),
                   uint8_t(frame_address),
-                  0,
-                  0,
-                  0,
-                  0,
-                  0,
+                  index,
+                  uint8_t(bound >> 16),
+                  uint8_t(bound >> 8),
+                  uint8_t(bound),
+                  track,
                   0,
                   speed,
                   0,
@@ -1971,6 +1974,157 @@ void disc_drive_landing()
     CHECK(command(0x06, 1000) == q(0x36, 1000));
 }
 
+// A subcode provider for the second track of disc_drive_index, from 1000: index 1 up to from and
+// index 2 from there. It counts its calls and fails with status 7 at stop_at.
+struct Marks
+{
+    uint32_t from = 0, stop_at = 0;
+    size_t calls = 0;
+};
+
+int provide_marks(void *user, uint32_t frame_address, uint8_t *symbols)
+{
+    Marks &marks = *static_cast<Marks *>(user);
+    ++marks.calls;
+    const uint8_t index = frame_address >= marks.from ? 0x02 : 0x01;
+    const auto given = q_symbols(q_at(0x01, 0x02, index, frame_address - 1000, frame_address));
+    std::copy(given.begin(), given.end(), symbols);
+    return frame_address == marks.stop_at ? 7 : 0;
+}
+
+void disc_drive_index()
+{
+    // A seek or play whose byte 8 names a track and whose byte 4 an index above 1 goes to the first
+    // sector from its frame address on whose Q holds them or later ones, before the bound in bytes 5
+    // to 7.
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    Audio audio;
+    CHECK(cdblock_set_audio_sink(b, take_audio, &audio) == 0);
+    cdblock_drive_config config;
+    cdblock_drive_config_defaults(&config);
+    config.seek_cycles = 0;
+    Peer peer(b, &config);
+    // A data track, audio tracks from 1000 and 1500 and the lead-out at 2000. The second track's
+    // subcode holds index 2 from 1100, index 3 from 1200 and index 10 from 1300, with the time from
+    // the track's start. The third has no subcode.
+    const cdblock_track tracks[3] = {{150, 0x41}, {1000, 0x01}, {1500, 0x01}};
+    CHECK(cdblock_drive_disc_tracks(b, tracks, 3, 2000) == 0);
+    auto marked = [](uint32_t frame_address) {
+        const uint8_t index = frame_address >= 1300 ? 0x10 : frame_address >= 1200 ? 0x03 : 0x02;
+        return q_at(0x01, 0x02, index, frame_address - 1000, frame_address);
+    };
+    for (uint32_t frame_address = 1100; frame_address < 1500; ++frame_address)
+        CHECK(cdblock_drive_disc_subcode(b, frame_address, q_symbols(marked(frame_address)).data()) == 0);
+    // A command as the firmware sends it for a track's index, at single speed. Returns the report
+    // of the link frame after the one that carried it.
+    auto command = [&](uint8_t code, uint32_t frame_address, uint8_t index, uint32_t bound, uint8_t track) {
+        peer.stage(code, frame_address, 1, index, bound, track);
+        peer.link_frame();
+        return peer.link_frame();
+    };
+    auto last_command = [&] { return std::string(b.log(CDBLOCK_LOG_DRIVE_COMMAND).back().text); };
+    auto frames = [&](int count) {
+        for (int i = 0; i < count; ++i)
+            peer.link_frame();
+    };
+    using Addresses = std::vector<uint32_t>;
+    // A track's start in the second track and at the third's start.
+    const auto second = [](uint32_t frame_address) {
+        return q_at(0x01, 0x02, 0x01, frame_address - 1000, frame_address);
+    };
+    const Q third = q_at(0x01, 0x03, 0x01, 0, 1500);
+
+    // A play to index 2 lands 4 frames before it, in index 1, and plays from it: the sectors on the
+    // way are muted. The reports name the index from its first sector on, and the log where it went.
+    CHECK(command(0x06, 1000, 2, 1500, 2) == q_report(0x36, second(1096)));
+    CHECK(last_command().ends_with(", index 2 of track 2 at 1100"));
+    frames(3);
+    CHECK(peer.link_frame() == q_report(0x36, marked(1100)) && audio.frame_addresses.empty());
+    peer.link_frame();
+    CHECK((audio.frame_addresses == Addresses{1100}));
+    // A seek to index 3 pauses at its first sector.
+    CHECK(command(0x09, 1000, 3, 1500, 2) == q_report(0x46, marked(1200)));
+    CHECK(last_command().ends_with(", index 3 of track 2 at 1200"));
+
+    // Index 1, index 0, track 0 and a command with bytes 4 to 9 zero go to the frame address, as
+    // before, and the log adds nothing.
+    CHECK(command(0x09, 1000, 1, 1500, 2) == q_report(0x46, second(1000)) && !contains(last_command(), "index"));
+    CHECK(command(0x09, 1050, 0, 1500, 2) == q_report(0x46, second(1050)) && !contains(last_command(), "index"));
+    CHECK(command(0x09, 1060, 2, 1500, 0) == q_report(0x46, second(1060)) && !contains(last_command(), "index"));
+    CHECK(command(0x09, 1070, 0, 0, 0) == q_report(0x46, second(1070)) && !contains(last_command(), "index"));
+
+    // An index the track does not hold is passed for a later one, as the firmware takes a later
+    // index for its target: index 4 goes to index 10, which the Q holds in BCD.
+    CHECK(command(0x09, 1000, 4, 1500, 2) == q_report(0x46, marked(1300)));
+    CHECK(last_command().ends_with(", past index 4 of track 2 at 1300, Q track 02 index 10"));
+    CHECK(command(0x09, 1000, 10, 1500, 2) == q_report(0x46, marked(1300)));
+    CHECK(last_command().ends_with(", index 10 of track 2 at 1300"));
+
+    // Without a later one the drive goes to the bound, the next track's start. A play lands before
+    // it and plays from there.
+    CHECK(command(0x09, 1000, 11, 1500, 2) == q_report(0x46, third));
+    CHECK(last_command().ends_with(", no index 11 of track 2, to 1500"));
+    audio.frame_addresses.clear();
+    CHECK(command(0x06, 1000, 11, 1500, 2) == q_report(0x36, marked(1496)));
+    frames(5);
+    CHECK((audio.frame_addresses == Addresses{1500}));
+    // The search ends at the bound, with index 3 past it.
+    CHECK(command(0x09, 1000, 3, 1150, 2) == q_report(0x46, marked(1150)));
+    CHECK(last_command().ends_with(", no index 3 of track 2, to 1150"));
+    // A track without subcode holds no index above 1: in the third the drive goes to the lead-out.
+    // No Q here holds a track or an index as high as 162 or 170, which do not fit a BCD byte.
+    CHECK(command(0x09, 1500, 2, 2000, 3) == report(0x46, 0x01, 0xaa, 1, 0, 2000));
+    CHECK(command(0x09, 1000, 2, 1500, 162) == q_report(0x46, third));
+    CHECK(last_command().ends_with(", no index 2 of track 162, to 1500"));
+    CHECK(command(0x09, 1000, 170, 1500, 2) == q_report(0x46, third));
+    // A bound at or before the frame address leaves nothing to look at: the drive goes to the frame
+    // address.
+    CHECK(command(0x09, 1000, 2, 900, 2) == q_report(0x46, second(1000)));
+    CHECK(last_command().ends_with(", no index 2 of track 2, to 1000"));
+
+    // A later track counts as past the index too: the third's pregap, whose Q names it at index 0.
+    // For an index of the third, the second's later indexes do not count.
+    const auto pregap = [](uint32_t frame_address) {
+        return q_at(0x01, 0x03, 0x00, 1499 - frame_address, frame_address);
+    };
+    for (uint32_t frame_address = 1450; frame_address < 1500; ++frame_address)
+        CHECK(cdblock_drive_disc_subcode(b, frame_address, q_symbols(pregap(frame_address)).data()) == 0);
+    CHECK(command(0x09, 1000, 11, 1500, 2) == q_report(0x46, pregap(1450)));
+    CHECK(last_command().ends_with(", past index 11 of track 2 at 1450, Q track 03 index 00"));
+    CHECK(command(0x09, 1000, 2, 1500, 3) == q_report(0x46, third));
+
+    // A Q of ADR 2 at the index's first sector is passed by, though its bytes read as track 2 and
+    // index 2, so the index starts at the next one.
+    const Q catalogue = {0x02, 0x02, 0x02, 0x56, 0x78, 0x90, 0x12, 0x30, 0x00, 0x52};
+    CHECK(cdblock_drive_disc_subcode(b, 1100, q_symbols(catalogue).data()) == 0);
+    CHECK(command(0x09, 1000, 2, 1500, 2) == q_report(0x46, marked(1101)));
+    // An unreachable sector on the way ends the search there, and the seek never arrives. The next
+    // command is obeyed.
+    CHECK(cdblock_drive_disc_sector_state(b, 1150, 1, CDBLOCK_SECTOR_UNREACHABLE, 0) == 0);
+    CHECK(command(0x09, 1000, 3, 1500, 2)[0] == 0x22);
+    CHECK(last_command().ends_with(", no index 3 of track 2, to 1150") && peer.link_frame()[0] == 0x22);
+    CHECK(command(0x09, 1000, 2, 1500, 2) == q_report(0x46, marked(1101)));
+    CHECK(cdblock_drive_disc_sector_state(b, 1150, 1, CDBLOCK_SECTOR_PRESENT, 0) == 0);
+
+    // A subcode provider's Q counts as the disc's, and it is asked once for each sector the search
+    // looks at: 1000 to 1234 here. The report at the index takes the Q the search took last.
+    Marks marks;
+    marks.from = 1234;
+    CHECK(cdblock_drive_disc_subcode_provider(b, provide_marks, &marks) == 0);
+    peer.link_frame();
+    const size_t before = marks.calls;
+    CHECK(command(0x09, 1000, 2, 1500, 2) == q_report(0x46, q_at(0x01, 0x02, 0x02, 234, 1234)));
+    CHECK(marks.calls - before == 235);
+    // Its nonzero status fails the board in a search too, and the log names the search.
+    marks.stop_at = 1300;
+    peer.stage(0x09, 1000, 1, 9, 1500, 2);
+    peer.link_frame();
+    CHECK(peer.failed && contains(b.error(), "subcode provider stopped the run with status 7 at frame address 1300"));
+    CHECK(last_command().ends_with(", the search for index 9 of track 2 failed"));
+}
+
 void disc_drive_while_running()
 {
     // The drive acts as the CPU runs, an instruction a cycle. Nothing answers its strobes here.
@@ -2053,6 +2207,7 @@ const std::vector<Test> drive_tests = {
     {"disc drive over a long advance", disc_drive_long_advance},
     {"disc drive and a timer in the skip query", disc_drive_and_timer_skip},
     {"disc drive read landing before its frame address", disc_drive_landing},
+    {"disc drive seek and play to a track's index", disc_drive_index},
     {"disc drive while the CPU runs", disc_drive_while_running},
     {"disc drive chosen after the board found no event", disc_drive_chosen_later},
     {"SCI0 transfer a timer's DMA unit starts", timer_dma_starts_transfer},

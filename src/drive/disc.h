@@ -71,6 +71,19 @@
 // lead-out, and which sector's Q a report carries against the sector at the decoder input (here
 // the report after a sector carries the next sector's).
 //
+// A seek or play whose byte 8 names a track and whose byte 4 an index above 1 goes to that index:
+// the first sector from its frame address on whose Q, of ADR 1, holds that track and index or
+// later ones, as the firmware compares them in taking its target reached. A later index of the
+// track counts, and a later track, such as the next one's pregap. The drive looks no further than
+// the frame address in bytes 5..7, the next track's start as the firmware sends it, and without a
+// match goes there, or to the one in bytes 1..3 if bytes 5..7 do not lie past it. An unreachable
+// sector on the way ends the search there, so the seek never arrives. The drive looks as it obeys
+// the command, then seeks as to any frame address: a play lands before the index and plays from
+// it, so the sectors passed on the way are not played. A disc without subcode holds no index above
+// 1, and a data track rarely does, so there such a command goes to the next track. Unconfirmed:
+// how a real drive finds an index, whether it takes a later index or track for the one asked for,
+// what it reports and plays on the way, how long it takes, and what it does without a match.
+//
 // The firmware acts on the status byte's code, bits 7..4, and for code 8 on the low nibble too: 80,
 // 81 and 83 pick drive states of their own, 80 the open tray's and 83 the missing disc's, and
 // 88..8f an error. This drive never sends 81 or 82: what they mean to a drive is unknown. Bit 2
@@ -92,7 +105,7 @@
 //   0      Command
 //   1..3   Frame address, binary
 //   4..9   A track seek or read: the index in byte 4, the next track's start frame in 5..7 and the
-//          track in 8. This drive ignores them
+//          track in 8, binary. A seek or play goes to an index above 1 (above)
 //   10     Speed, 1 single and 2 double, any other value keeping it
 //
 // What 05 and 0c do in a real drive is unknown, 0c above all in one whose lid opens by hand.
@@ -158,9 +171,9 @@ using SectorProvider = std::function<int(uint32_t frame_address, uint8_t *raw)>;
 // A sector's subcode: its 96 symbols in disc order, R to W in the low six bits of each and the Q
 // channel in bit 6.
 using Subcode = std::array<uint8_t, 96>;
-// Called as the drive takes a sector's subcode, for a report's Q, a subcode block or to tell an
-// audio sector by its Q, with its frame address and the symbols the disc holds there to change.
-// Nonzero fails the board.
+// Called as the drive takes a sector's subcode, for a report's Q, a subcode block, to tell an audio
+// sector by its Q or to look for an index, with its frame address and the symbols the disc holds
+// there to change. Nonzero fails the board.
 using SubcodeProvider = std::function<int(uint32_t frame_address, uint8_t *symbols)>;
 
 class DiscDrive final : public Drive
@@ -327,9 +340,9 @@ class DiscDrive final : public Drive
     Subcode block{};
     uint64_t block_at = 0, block_period = 0, subcode_at = 0;
     unsigned block_frame = 0;
-    // The subcode the drive took last, for a report's Q, a block or an audio sector's Q, and its
-    // frame address. The
-    // drive takes it anew after subcode is written, a provider is set or the drive starts.
+    // The subcode the drive took last, for a report's Q, a block, an audio sector's Q or a search for
+    // an index, and its frame address. The drive takes it anew after subcode is written, a provider
+    // is set or the drive starts.
     Subcode taken_symbols{};
     uint32_t taken_address = 0;
     bool taken = false;
@@ -353,6 +366,18 @@ class DiscDrive final : public Drive
     std::array<uint8_t, link_frame_size> report();
     void obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_t now);
     void seek(uint32_t frame_address, Mode arrive, uint64_t now);
+    // Where a seek or play to a track's index goes, whether a Q there held the track and index or
+    // later ones, and the Q's track and index bytes, BCD.
+    struct IndexSearch
+    {
+        uint32_t frame_address = 0;
+        bool found = false;
+        uint8_t track = 0, index = 0;
+    };
+    // From frame_address up to bound, the first sector whose Q, of ADR 1, holds track and index or
+    // later ones, or an unreachable sector on the way. Without either it is bound, or frame_address
+    // when bound does not lie past it.
+    IndexSearch index_frame(uint32_t frame_address, uint32_t bound, unsigned track, unsigned index);
     // Where a read of the target arrives: landing_frames before it, short of frame address 0 and of
     // an unreachable one.
     uint32_t landing() const;

@@ -20,7 +20,8 @@ constexpr uint8_t cmd_none = 0x00, cmd_ring_seek = 0x02, cmd_toc = 0x03, cmd_sto
                   cmd_open_tray = 0x0c;
 constexpr size_t report_status = 0, report_control = 1, report_track = 2, report_index = 3, report_relative = 4,
                  report_absolute = 8, ring_word = 1, ring_address = 3, ring_bytes = 6;
-constexpr size_t command_byte = 0, command_address = 1, command_speed = 10;
+constexpr size_t command_byte = 0, command_address = 1, command_index = 4, command_bound = 5, command_track = 8,
+                 command_speed = 10;
 // Yabause's answer to a ring seek.
 constexpr RingAnswer yabause{0x44f1, {0x09, 0x09, 0x09, 0x09}};
 // The TOC's points after the tracks: the first track, the last track and the lead-out.
@@ -33,6 +34,12 @@ constexpr uint8_t data_bit = 0x40;
 uint8_t bcd(uint32_t value)
 {
     return uint8_t((value / 10) << 4 | value % 10);
+}
+
+// A BCD byte's value, each nibble a digit, as the firmware reads one: aa is 110.
+unsigned from_bcd(uint8_t value)
+{
+    return unsigned(value >> 4) * 10 + (value & 0x0f);
 }
 
 // The inverted sum of a link frame's payload, which each side sends.
@@ -454,9 +461,11 @@ void DiscDrive::obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_
     if (bytes.size() < link_frame_size)
         return;
     const uint8_t command = bytes[command_byte], speed_byte = bytes[command_speed];
-    const uint32_t frame_address =
-        uint32_t(bytes[command_address]) << 16 | uint32_t(bytes[command_address + 1]) << 8 | bytes[command_address + 2];
-    const auto note = [&](const char *outcome) {
+    const auto address_at = [&](size_t at) {
+        return uint32_t(bytes[at]) << 16 | uint32_t(bytes[at + 1]) << 8 | bytes[at + 2];
+    };
+    const uint32_t frame_address = address_at(command_address);
+    const auto note = [&](const std::string &outcome) {
         port.note(DrivePort::Note::Command, frame_address, command, text(bytes.data(), link_frame_size) + outcome);
     };
     if (bytes[sum_byte] != payload_sum(bytes.data()))
@@ -478,7 +487,35 @@ void DiscDrive::obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_
         note(", no disc, not obeyed");
         return;
     }
-    note("");
+    // A seek or play to a track's index above 1 goes to the first sector at or past the index, which
+    // the drive finds as it obeys the command. The log names where it goes, and the search a
+    // subcode provider failed.
+    uint32_t to = frame_address;
+    std::string outcome;
+    const unsigned track = bytes[command_track], index = bytes[command_index];
+    if ((command == cmd_play || command == cmd_seek) && track && index > 1)
+    {
+        const std::string asked = "index " + std::to_string(index) + " of track " + std::to_string(track);
+        IndexSearch search;
+        try
+        {
+            search = index_frame(frame_address, address_at(command_bound), track, index);
+        }
+        catch (...)
+        {
+            note(", the search for " + asked + " failed");
+            throw;
+        }
+        to = search.frame_address;
+        if (!search.found)
+            outcome = ", no " + asked + ", to " + std::to_string(to);
+        else if (from_bcd(search.track) == track && from_bcd(search.index) == index)
+            outcome = ", " + asked + " at " + std::to_string(to);
+        else
+            outcome = ", past " + asked + " at " + std::to_string(to) + ", Q track " + text(&search.track, 1) +
+                      " index " + text(&search.index, 1);
+    }
+    note(outcome);
     // Byte 10 is taken as the speed, 1 single and 2 double, as the firmware's use of it suggests.
     if (speed_byte == 1 || speed_byte == 2)
         speed = speed_byte;
@@ -502,13 +539,13 @@ void DiscDrive::obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_
         halt(Mode::Stopped);
         break;
     case cmd_play:
-        seek(frame_address, Mode::Playing, now);
+        seek(to, Mode::Playing, now);
         break;
     case cmd_pause:
         halt(Mode::Paused);
         break;
     case cmd_seek:
-        seek(frame_address, Mode::Paused, now);
+        seek(to, Mode::Paused, now);
         break;
     case cmd_scan_forward:
     case cmd_scan_backward:
@@ -531,6 +568,28 @@ void DiscDrive::seek(uint32_t frame_address, Mode arrive, uint64_t now)
     seeking = true;
     subcode_at = 0;
     seek_until = now + config.seek_cycles;
+}
+
+DiscDrive::IndexSearch DiscDrive::index_frame(uint32_t frame_address, uint32_t bound, unsigned track, unsigned index)
+{
+    // From the frame address on, as a drive reading on from the track's start, up to the bound and
+    // never before the frame address.
+    const uint32_t from = std::min(frame_address, last_frame_address);
+    const uint32_t end = std::min(std::max(bound, from), last_frame_address);
+    for (uint32_t at = from; at < end; ++at)
+    {
+        // The drive loses its place at an unreachable sector, so its seek ends there and never
+        // arrives.
+        if (unreachable(at))
+            return {at};
+        // A track and index at or past the ones asked for, as the firmware takes its target
+        // reached: the index, a later one of the track, or a later track.
+        uint8_t q[10];
+        if (q_of(symbols_at(at), q) && (q[0] & 0x0f) == 1 &&
+            (from_bcd(q[1]) > track || (from_bcd(q[1]) == track && from_bcd(q[2]) >= index)))
+            return {at, true, q[1], q[2]};
+    }
+    return {end};
 }
 
 uint32_t DiscDrive::landing() const
