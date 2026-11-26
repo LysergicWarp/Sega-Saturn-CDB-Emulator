@@ -4,7 +4,7 @@
 namespace
 {
 
-const cdblock_options clocked{sizeof(cdblock_options), CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
 constexpr uint32_t smr1 = 0x05fffec8, brr1 = 0x05fffec9, scr1 = 0x05fffeca, tdr1 = 0x05fffecb, ssr1 = 0x05fffecc,
                    rdr1 = 0x05fffecd, pbcr1_low = 0x05ffffcd;
 // 8N1 at BRR1 0x41: 32 × 66 cycles a bit, ten bits a serial frame.
@@ -409,7 +409,7 @@ void test_pad()
 {
     Program p;
     p.loop();
-    const cdblock_options low{sizeof(cdblock_options), CDBLOCK_TEST_LOW, nullptr, 0, 0};
+    const cdblock_options low{CDBLOCK_TEST_LOW, nullptr, 0, 0};
     Board b(p, &low);
     // PB10 reads the pad, bit 2 of PBDR, while it is a general input.
     CHECK(!(b.read(0x05ffffc2, 1) & 4));

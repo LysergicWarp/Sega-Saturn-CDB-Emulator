@@ -9,7 +9,7 @@
 namespace
 {
 
-const cdblock_options clocked{sizeof(cdblock_options), CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
 constexpr uint64_t double_speed = 133'333, single_speed = 266'667, strobe = 4'000;
 
 uint8_t bcd(uint32_t value)
@@ -193,7 +193,7 @@ void disc_drive_select()
     Board b(p, &clocked);
     cdblock_drive_config config;
     cdblock_drive_config_defaults(&config);
-    CHECK(config.size == sizeof config && config.sector_cycles == single_speed && config.strobe_cycles == strobe);
+    CHECK(config.sector_cycles == single_speed && config.strobe_cycles == strobe);
     CHECK(config.seek_cycles == 1'333'333 && config.scan_frames == 15 && config.landing_frames == 4);
     // Settings the drive cannot run with.
     auto refused = [&](cdblock_drive_config c, const char *why) {
@@ -213,9 +213,6 @@ void disc_drive_select()
     c = config;
     c.landing_frames = 450'000;
     refused(c, "lands");
-    c = config;
-    c.size = 8;
-    refused(c, "size");
     // The bounds themselves are allowed.
     for (auto set : {+[](cdblock_drive_config &s) { s.strobe_cycles = 10'256; },
                      +[](cdblock_drive_config &s) { s.scan_frames = 449'999; },

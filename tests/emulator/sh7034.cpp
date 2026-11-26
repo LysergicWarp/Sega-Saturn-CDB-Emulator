@@ -143,7 +143,7 @@ void timer_overflow()
 }
 
 const uint8_t card_rom[16] = {};
-const cdblock_options clocked{sizeof(cdblock_options), CDBLOCK_CLOCK, card_rom, sizeof card_rom, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, card_rom, sizeof card_rom, 0};
 
 void clock_prescalers()
 {
@@ -230,7 +230,7 @@ void clock_rate()
 {
     Program p;
     p.loop();
-    const cdblock_options eight{sizeof(cdblock_options), CDBLOCK_CLOCK, card_rom, sizeof card_rom, 8};
+    const cdblock_options eight{CDBLOCK_CLOCK, card_rom, sizeof card_rom, 8};
     Board b(p, &eight);
     b.write(0x05ffff04, 1, 0x03); // TCR0: φ/8
     b.write(0x05ffff00, 1, 0x01);

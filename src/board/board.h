@@ -52,17 +52,17 @@ class Board final : public Sh1Port, public DrivePort
     // The board's state as bytes: a header, then what a run depends on. That is the CPU, the RAM,
     // the buffer, the on-chip modules, the interface chip, the card with its memory, the link, the
     // serial line, the drive with its disc, the clock and whether the board failed.
-    // - The header is the format's version, the state's size, the CRC-32 of what follows it, and
-    //   what the state was saved from: the ROM and the card ROM by their CRC-32, the options and
-    //   the drive with its settings.
+    // - The header is the state's size, the CRC-32 of what follows it, and what the state was
+    //   saved from: the ROM and the card ROM by their CRC-32, the options and the drive with its
+    //   settings.
     // - Not in it: the ROMs, lenient, the stops and checks, the log with its kinds and watches,
     //   coverage, the trace, the drive's providers and the audio sink. A load leaves the board's
     //   own of each.
     // save_state writes the state to out and returns its size, or with no out only the size.
     size_t save_state(uint8_t *out);
-    // Takes the state on, or throws StateError and leaves the board as it was: for another
-    // version, a size or CRC that does not fit the bytes, a board that differs in what the state
-    // was saved from, or a value the board cannot hold.
+    // Takes the state on, or throws StateError and leaves the board as it was: for a size or CRC
+    // that does not fit the bytes, a board that differs in what the state was saved from, or a
+    // value the board cannot hold.
     void load_state(const uint8_t *in, size_t size);
 
     void reset();

@@ -180,19 +180,16 @@ Board::Board(std::vector<uint8_t> rom_image, BoardOptions board_options)
 namespace
 {
 
-// The state format this library writes and reads, and the size of what a state starts with: the
-// version, the state's size and the CRC-32 of the rest.
-constexpr uint32_t state_version = 1;
-constexpr size_t state_start = 4 + 8 + 4;
+// The size of what a state starts with: the state's size and the CRC-32 of the rest.
+constexpr size_t state_start = 8 + 4;
 
 }
 
 size_t Board::save_state(uint8_t *out)
 {
     StateIo io = StateIo::writer(out);
-    uint32_t version = state_version, sum = 0;
+    uint32_t sum = 0;
     uint64_t size = 0;
-    io.u32(version);
     io.u64(size);
     io.u32(sum);
     identify(io);
@@ -202,7 +199,7 @@ size_t Board::save_state(uint8_t *out)
         // The size and the CRC-32, now that the bytes are there.
         size = io.position();
         sum = crc32(out + state_start, io.position() - state_start);
-        StateIo start = StateIo::writer(out + 4);
+        StateIo start = StateIo::writer(out);
         start.u64(size);
         start.u32(sum);
     }
@@ -212,12 +209,8 @@ size_t Board::save_state(uint8_t *out)
 void Board::load_state(const uint8_t *in, size_t size)
 {
     StateIo io = StateIo::reader(in, size);
-    uint32_t version = 0, sum = 0;
+    uint32_t sum = 0;
     uint64_t length = 0;
-    io.u32(version);
-    if (version != state_version)
-        throw StateError("the state has format version " + std::to_string(version) +
-                         ", and this library reads version " + std::to_string(state_version));
     io.u64(length);
     io.u32(sum);
     if (length != size)

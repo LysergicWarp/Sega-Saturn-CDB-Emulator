@@ -340,8 +340,7 @@ What a board without a card reads there is unconfirmed.
 #include "cdblock.h"
 
 /* rom is a 64 KB CD-block dump, and card_rom an MPEG card's ROM, or NULL with a size of 0. */
-cdblock_options options = {sizeof options, CDBLOCK_DEVICE_TIMING | CDBLOCK_CLOCK,
-                           card_rom, card_rom_size, 0};
+cdblock_options options = {CDBLOCK_DEVICE_TIMING | CDBLOCK_CLOCK, card_rom, card_rom_size, 0};
 cdblock_board *board = cdblock_create(rom, 65536, &options);
 cdblock_add_stop(board, idle_pc); /* the firmware's idle loop, below */
 if (cdblock_run(board, 50000000, NULL) != CDBLOCK_EXIT_STOP) puts(cdblock_last_error(board));
@@ -813,22 +812,19 @@ What it leaves out:
 
 The bytes:
 
-- A state starts with its format version, its size and the CRC-32 of the rest. Then it names what
-  it was saved from: the ROM and the card ROM by their CRC-32, the options and the drive with its
-  settings.
+- A state starts with its size and the CRC-32 of the rest. Then it names what it was saved from:
+  the ROM and the card ROM by their CRC-32, the options and the drive with its settings.
 - It takes about 530 KB, and about 1050 KB with an MPEG card, whose memory is 512 KB. The size
   follows what the board holds, so ask `cdblock_state_size` before each save.
 - The bytes are the same on every platform, and a board that loads a state saves the same bytes
   again.
-- The format version is 1. A state loads only in a library with the same version.
 
 Loading:
 
 - Make the board as it was made for the save, select the same drive with the same settings, then
   load.
-- A load refuses a state of another format version, one whose size or CRC-32 does not fit its
-  bytes, one saved from a board that differs in what the state names, and one with a field outside
-  its range.
+- A load refuses a state whose size or CRC-32 does not fit its bytes, one saved from a board that
+  differs in what the state names, and one with a field outside its range.
 - A refused state leaves the board as it was, not failed, with the reason in `cdblock_last_error`.
 - The range checks keep a made-up state from taking the board outside its memory and tables. They
   do not make it a state a run leads to: the board goes on from what it was given, as from memory

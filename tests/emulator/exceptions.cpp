@@ -90,7 +90,7 @@ void fetch_errors()
     }
 }
 
-const cdblock_options clocked{sizeof(cdblock_options), CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
 
 void fetch_errors_on_the_clock()
 {

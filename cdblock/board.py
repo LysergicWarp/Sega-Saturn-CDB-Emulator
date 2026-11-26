@@ -22,7 +22,7 @@ class EmulatorError(Exception):
 class Board:
     def __init__(self, rom, card_rom=None, flags=0, lib=None, cycles_per_instruction=0):
         self.lib = lib or b.load()
-        options = b.Options(ctypes.sizeof(b.Options), flags, None, 0, cycles_per_instruction)
+        options = b.Options(flags, None, 0, cycles_per_instruction)
         if card_rom is not None:
             self._card = (b.u8 * len(card_rom)).from_buffer_copy(card_rom)
             options.card_rom = ctypes.cast(self._card, ctypes.POINTER(b.u8))
@@ -303,8 +303,9 @@ class Board:
         landing_frames, the others keeping their defaults."""
         config = b.DriveConfig()
         self.lib.cdblock_drive_config_defaults(ctypes.byref(config))
+        fields = {field for field, _ in b.DriveConfig._fields_}
         for name, value in settings.items():
-            if name == "size" or not hasattr(config, name):
+            if name not in fields:
                 raise ValueError(f"no drive setting {name}")
             setattr(config, name, value)
         self._ok(self.lib.cdblock_drive_select_disc(self.handle, ctypes.byref(config)))

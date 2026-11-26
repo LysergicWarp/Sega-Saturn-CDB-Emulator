@@ -118,11 +118,6 @@ cdblock_board *cdblock_create(const uint8_t *rom, size_t rom_size, const cdblock
         cdblock::BoardOptions o;
         if (options)
         {
-            if (options->size < sizeof(cdblock_options))
-            {
-                create_error = "cdblock_options.size is smaller than this library's options";
-                return nullptr;
-            }
             o.test_low = options->flags & CDBLOCK_TEST_LOW;
             o.pc0_high = options->flags & CDBLOCK_PC0_HIGH;
             o.probe_mirror = options->flags & CDBLOCK_PROBE_MIRROR;
@@ -480,8 +475,7 @@ int cdblock_drive_select(cdblock_board *b, int kind)
 void cdblock_drive_config_defaults(cdblock_drive_config *config)
 {
     const cdblock::DiscDriveConfig d;
-    *config = {
-        sizeof(cdblock_drive_config), d.sector_cycles, d.strobe_cycles, d.seek_cycles, d.scan_frames, d.landing_frames};
+    *config = {d.sector_cycles, d.strobe_cycles, d.seek_cycles, d.scan_frames, d.landing_frames};
 }
 
 int cdblock_drive_select_disc(cdblock_board *b, const cdblock_drive_config *config)
@@ -492,12 +486,8 @@ int cdblock_drive_select_disc(cdblock_board *b, const cdblock_drive_config *conf
         return fail(b, "the disc drive keeps its time on the clock, and the board has none");
     cdblock::DiscDriveConfig c;
     if (config)
-    {
-        if (config->size < sizeof(cdblock_drive_config))
-            return fail(b, "cdblock_drive_config.size is smaller than this library's configuration");
         c = {config->sector_cycles, config->strobe_cycles, config->seek_cycles, config->scan_frames,
              config->landing_frames};
-    }
     if (const char *why = cdblock::DiscDrive::invalid(c))
         return fail(b, why);
     b->board->set_drive(std::make_unique<cdblock::DiscDrive>(c, b->board->cycles()));

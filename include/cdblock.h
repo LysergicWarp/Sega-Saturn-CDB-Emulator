@@ -59,7 +59,6 @@ typedef struct cdblock_board cdblock_board;
 
 typedef struct cdblock_options
 {
-    uint32_t size;  /* sizeof(cdblock_options) */
     uint32_t flags; /* CDBLOCK_TEST_LOW, CDBLOCK_PC0_HIGH, CDBLOCK_PROBE_MIRROR, CDBLOCK_DEVICE_TIMING, CDBLOCK_CLOCK */
     const uint8_t *card_rom;         /* the MPEG card's ROM, NULL for no card */
     size_t card_rom_size;            /* at most 512 KB, padded with zeros */
@@ -146,10 +145,10 @@ CDBLOCK_EXPORT int cdblock_reset(cdblock_board *board);
  * - The disc drive's state has its disc: the tracks, the sectors, subcode and sector states given,
  *   the tray and whether a disc is in. A caller that serves its disc through the providers saves
  *   little there. The fed drive's has the link frames and sectors still queued.
- * - A state starts with its format version, its size and the CRC-32 of the rest, then names what
- *   it was saved from: the ROM and the card ROM by their CRC-32, the options and the drive with
- *   its settings. cdblock_state_load refuses a state whose version, size or CRC does not fit,
- *   one saved from a board that differs in any of those, and one with a field outside its range.
+ * - A state starts with its size and the CRC-32 of the rest, then names what it was saved from:
+ *   the ROM and the card ROM by their CRC-32, the options and the drive with its settings.
+ *   cdblock_state_load refuses a state whose size or CRC does not fit, one saved from a board that
+ *   differs in any of those, and one with a field outside its range.
  *   A refused state leaves the board as it was, and does not fail it.
  * - The range checks keep a made-up state from taking the board outside its memory and tables.
  *   They do not make it a state a run leads to: the board goes on from what it was given, as from
@@ -165,7 +164,7 @@ CDBLOCK_EXPORT int cdblock_reset(cdblock_board *board);
  *   writes that many bytes to out, and fails when size is smaller. cdblock_state_load takes size
  *   as the state's own size, to the byte.
  * - The bytes are the same on every platform, and a board that loads a state saves the same bytes
- *   again. A state loads only in a library with the same format version.
+ *   again.
  * - Save and load between calls, not inside a provider or the audio sink. */
 CDBLOCK_EXPORT size_t cdblock_state_size(cdblock_board *board);
 CDBLOCK_EXPORT int cdblock_state_save(cdblock_board *board, uint8_t *out, size_t size);
@@ -311,7 +310,6 @@ CDBLOCK_EXPORT int cdblock_link_sent(cdblock_board *board, uint8_t *bytes, size_
  * README.md, The disc drive, has its commands, reports and timing. */
 typedef struct cdblock_drive_config
 {
-    uint32_t size;           /* sizeof(cdblock_drive_config) */
     uint32_t sector_cycles;  /* a sector at single speed: 266667, 1/75 s of a 20 MHz clock */
     uint32_t strobe_cycles;  /* from one strobe to the next: 4000. 13 of them within a sector at double speed */
     uint32_t seek_cycles;    /* from a seek, read or ring seek to its frame address: 1333333 */

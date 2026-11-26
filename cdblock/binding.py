@@ -25,8 +25,7 @@ P = ctypes.POINTER
 
 
 class Options(ctypes.Structure):
-    _fields_ = [("size", u32), ("flags", u32), ("card_rom", P(u8)), ("card_rom_size", size_t),
-                ("cycles_per_instruction", u32)]
+    _fields_ = [("flags", u32), ("card_rom", P(u8)), ("card_rom_size", size_t), ("cycles_per_instruction", u32)]
 
 
 class Cpu(ctypes.Structure):
@@ -39,8 +38,8 @@ class Strobe(ctypes.Structure):
 
 
 class DriveConfig(ctypes.Structure):
-    _fields_ = [("size", u32), ("sector_cycles", u32), ("strobe_cycles", u32), ("seek_cycles", u32),
-                ("scan_frames", u32), ("landing_frames", u32)]
+    _fields_ = [("sector_cycles", u32), ("strobe_cycles", u32), ("seek_cycles", u32), ("scan_frames", u32),
+                ("landing_frames", u32)]
 
 
 class Track(ctypes.Structure):

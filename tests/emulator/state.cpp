@@ -55,8 +55,8 @@ uint32_t crc_more(uint32_t running, const uint8_t *bytes, size_t count)
     return running;
 }
 
-// A state's start after its version: its size, and the CRC-32 of what follows them.
-constexpr size_t size_at = 4, crc_at = 12, start_size = 16;
+// A state's start: its size, and the CRC-32 of what follows them.
+constexpr size_t size_at = 0, crc_at = 8, start_size = 12;
 
 // The size and CRC-32 of a changed state set to fit its bytes, so that only the parts can refuse it.
 void seal(std::vector<uint8_t> &state)
@@ -294,8 +294,8 @@ void format()
     Board b(p);
     CHECK(b.run(10) == CDBLOCK_EXIT_BUDGET);
     const auto state = saved(b);
-    // Version 1, the state's own size, and the CRC-32 of the rest by another implementation.
-    CHECK(get32(state, 0) == 1 && get32(state, size_at) == state.size() && get32(state, size_at + 4) == 0);
+    // The state's own size, and the CRC-32 of the rest by another implementation.
+    CHECK(get32(state, size_at) == state.size() && get32(state, size_at + 4) == 0);
     CHECK(get32(state, crc_at) == ~crc_more(0xffffffff, state.data() + start_size, state.size() - start_size));
     // Without a card or a disc: the RAM, the buffer and less than 2 KB more.
     CHECK(state.size() > 0x81000 && state.size() < 0x81800);
@@ -312,9 +312,8 @@ void format()
 }
 
 const uint8_t card_rom[4] = {0x12, 0x34, 0x56, 0x78};
-const cdblock_options machine_options{sizeof(cdblock_options), CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, card_rom,
-                                      sizeof card_rom, 3};
-const cdblock_options cardless_options{sizeof(cdblock_options), CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, nullptr, 0, 3};
+const cdblock_options machine_options{CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom, 3};
+const cdblock_options cardless_options{CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, nullptr, 0, 3};
 
 // A counter in r0, stored and then a SLEEP each pass, with SR.I at 0. ITU0's compare match A has a
 // handler that clears the flag and counts at 0x0f000200, IRQ6 and IRQ7 each one that clears the
@@ -713,7 +712,7 @@ void fed()
 // The disc drive on the clock. The SH-1's side of the link is done by hand at each event, from
 // the board's RAM alone: the packet for the link frame that runs, the one staged for the next, and
 // the script's last step.
-const cdblock_options disc_options{sizeof(cdblock_options), CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options disc_options{CDBLOCK_CLOCK, nullptr, 0, 0};
 constexpr uint32_t packet_at = 0x0f000800, staged_at = 0x0f000810, step_at = 0x0f000820;
 constexpr uint64_t sector_period = 133'333;
 
@@ -1121,7 +1120,7 @@ void failed_inside()
     }
     {
         // The FIFO's request of channel 1, with device timing, likewise.
-        const cdblock_options timed{sizeof(cdblock_options), CDBLOCK_DEVICE_TIMING, nullptr, 0, 0};
+        const cdblock_options timed{CDBLOCK_DEVICE_TIMING, nullptr, 0, 0};
         Board b(p, &timed);
         const auto good = saved(b);
         const auto arm = [&](uint32_t source) {
@@ -1319,7 +1318,7 @@ void card_turns()
     // and how far the interrupt has got.
     Program p;
     p.loop();
-    const cdblock_options timed{sizeof(cdblock_options), CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom, 0};
+    const cdblock_options timed{CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom, 0};
     const auto sent = [](const Board &board) { return (board.peek(0x05ffff1b, 1) & 2) != 0; };
     Board b(p, &timed);
     b.write(0x05ffff19, 1, 0x50); // TIOR2: capture B on falling edges
@@ -1345,7 +1344,7 @@ void logged_once()
     // that loads the state logs none of them again.
     Program p;
     p.loop();
-    const cdblock_options clocked{sizeof(cdblock_options), CDBLOCK_CLOCK, nullptr, 0, 0};
+    const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
     const Make make = [&] {
         cdblock_board *made = cdblock_create(p.rom.data(), p.rom.size(), &clocked);
         if (made)
@@ -1396,7 +1395,7 @@ void refused()
     Program p;
     p.loop();
     const uint8_t other_rom[4] = {0x12, 0x34, 0x56, 0x79};
-    const cdblock_options options{sizeof(cdblock_options), CDBLOCK_CLOCK, card_rom, sizeof card_rom, 2};
+    const cdblock_options options{CDBLOCK_CLOCK, card_rom, sizeof card_rom, 2};
     Board source(p, &options);
     CHECK(source.run(50) == CDBLOCK_EXIT_BUDGET);
     const auto state = saved(source);
@@ -1460,11 +1459,11 @@ void refused()
             refuses(other, with_disc, "other drive settings");
         }
     }
-    // Into a board the state does load into: a state cut short, longer, changed or of another version.
+    // Into a board the state does load into: a state cut short, longer or changed.
     Board target(p, &options);
     CHECK(loads(target, state) && target.run(7) == CDBLOCK_EXIT_BUDGET);
     for (const size_t length :
-         {size_t(0), size_t(3), size_t(11), size_t(15), size_t(16), state.size() / 2, state.size() - 1})
+         {size_t(0), size_t(3), size_t(7), size_t(11), size_t(12), state.size() / 2, state.size() - 1})
         refuses(target, std::vector<uint8_t>(state.data(), state.data() + length), "state");
     auto longer = state;
     longer.push_back(0);
@@ -1478,9 +1477,6 @@ void refused()
     auto resized = state;
     resized[size_at] ^= 1;
     refuses(target, resized, "bytes long");
-    auto newer = state;
-    newer[0] = 2;
-    refuses(target, newer, "format version 2");
     CHECK(cdblock_state_load(target, nullptr, 16) == -1);
     // A state whose size and CRC fit, with a value no board holds. The state ends with the test
     // pad's flag, the failed flag and the count of the error's text.
@@ -1610,7 +1606,7 @@ void values()
         {
             auto cut = state;
             cut.resize(length);
-            refuses(b, cut, 0, 1, "ends before");
+            refuses(b, cut, size_at, 0, "ends before");
         }
     }
 }
