@@ -3,13 +3,17 @@
 // tracks up to its lead-out: one data track from 00:02:00 unless the caller gives others.
 //
 // Every sector period at the current speed the drive starts a link frame with its report, its
-// strobes a fixed number of cycles apart. The position moves on a frame a period while reading and
-// by the scan step while scanning, and holds otherwise. A command the SH-1 sends takes effect when
-// its link frame ends: seeks, reads and ring seeks arrive after a fixed latency, reporting seeking
-// until then, a read a few frames before its frame address. They reach past the lead-out, where
-// disc authentication's ring lies. While reading the drive hands each sector to the decoder input
-// before the report of the next link frame, an unreadable one with its decoder status and a
-// missing one not at all. Link frames go on in every state, so the SH-1 can always send a command.
+// strobes a fixed number of cycles apart. A stopped drive with a disc keeps that period,
+// unconfirmed. With the tray open, the drive looking for a disc or without one, a link frame
+// comes every idle_frame_cycles instead, as a JVC ENR-013A starts one every 16.626 ms. Its first
+// link frame after power-on or a reset comes one such period away. The position moves on a frame
+// a period while reading and by the scan step while scanning, and holds otherwise. A command the
+// SH-1 sends takes effect when its link frame ends: seeks, reads and ring seeks arrive after a
+// fixed latency, reporting seeking until then, a read a few frames before its frame address. They
+// reach past the lead-out, where disc authentication's ring lies. While reading the drive hands
+// each sector to the decoder input before the report of the next link frame, an unreadable one
+// with its decoder status and a missing one not at all. Link frames go on in every state, so the
+// SH-1 can always send a command.
 //
 // Each sector period it reads, the drive also sends a subcode block: 98 frames evenly spaced over
 // the period, the first marked as the block's start. Frames 0 to 95 carry the sector's 96 symbols
@@ -28,20 +32,25 @@
 // out while it is open. Opening stops the drive where it is. It then reports the open tray and
 // obeys nothing until the tray closes. Closing with a disc starts the drive as at power-on, paused
 // at the first frame address at double speed, which makes the firmware read the TOC. Closing
-// without one reports no disc, and the drive then obeys only command 0c. The link frames keep
-// their times through both, and the board's reset moves neither the tray nor the disc. Every
+// without one reports 12 in two link frames, then 02 while the drive looks for a disc for
+// search_cycles, then no disc, as a JVC ENR-013A does. The drive obeys only command 0c through
+// all of it. The link frame due when the tray opens or closes keeps its time, the ones after it
+// follow the new state's period, and the board's reset moves neither the tray nor the disc. Every
 // opening is reported in three link frames at the least: a tray closed before that reports open
 // in them all the same and starts with the link frame after, so the firmware sees a disc changed
 // in one go while one drive command of its own is on its way out.
-// Unconfirmed: the reports of a real drive after its tray closes, their order and how long each
-// lasts, as a drive has to spin up and look for a disc before it can report either. Here the
-// first link frame after the close, or after the opening's three, already does. Also what a
-// drive without a disc obeys, the bytes after the status in the open tray and no disc reports,
-// and whether a real drive whose tray is open reports it from its first link frame after a reset.
+// A JVC ENR-013A sends zeros after the status in the open tray, no disc, 12 and 02 reports, and
+// reports its open tray from its first link frame after power-on, as here. The two link frames of
+// 12, the search's length and the idle period are that drive's, unconfirmed for others.
+// Unconfirmed: whether a drive reports its open tray from its first link frame after a reset, as
+// here, and what one closed on an empty tray reports after a reset, here no disc at once, during
+// its search too. Also the reports of a real drive after its tray closes on a disc, their order
+// and how long each lasts: here the first link frame after the close, or after the opening's
+// three, already reports paused. And what a drive obeys without a disc or while it looks for one.
 //
-// The reports follow what the firmware accepts, the ring seek answers are Yabause's unless the
-// caller's provider gives others, providers can serve the disc's sectors and subcode, and the
-// timing is configurable: none of it is confirmed on a real drive.
+// The other reports follow what the firmware accepts, the ring seek answers are Yabause's unless
+// the caller's provider gives others, providers can serve the disc's sectors and subcode, and the
+// other timing is configurable: none of it is confirmed on a real drive.
 //
 // The tables below give the payload of a link frame (drive.h) as the firmware reads and writes it.
 //
@@ -86,13 +95,15 @@
 //
 // The firmware acts on the status byte's code, bits 7..4, and for code 8 on the low nibble too: 80,
 // 81 and 83 pick drive states of their own, 80 the open tray's and 83 the missing disc's, and
-// 88..8f an error. This drive never sends 81 or 82: what they mean to a drive is unknown. Bit 2
-// marks a report with a position. Bit 1 follows Yabause's status values and bit 3 is never set:
-// what either means is unknown.
+// 88..8f an error. This drive never sends 81 or 82, nor does a JVC ENR-013A closed on an empty
+// tray: what they mean to a drive is unknown. Bit 2 marks a report with a position. Bit 1 follows
+// Yabause's status values and a JVC ENR-013A's 12 and 02, and bit 3 is never set: what either
+// means is unknown.
 //
 //   Status  Report
+//   02      Looking for a disc after a close on an empty tray, no position: the firmware's code 0
 //   04      TOC entry
-//   12      Stopped, no position
+//   12      Stopped, or just closed on an empty tray, no position
 //   22      Seeking, no position
 //   36      Playing
 //   46      Paused
@@ -147,6 +158,12 @@ struct DiscDriveConfig
     // then takes the read's frame address at the first try. 4, as Ymir's drive emulation lands, is a
     // guess for stability and speed: where a real drive lands is unconfirmed.
     uint32_t landing_frames = 4;
+    // From one link frame to the next while no disc turns: the tray open, the drive looking for a
+    // disc or without one. 16.626 ms, as a JVC ENR-013A starts them, unconfirmed for other drives.
+    uint32_t idle_frame_cycles = 332'520;
+    // How long the drive looks for a disc after a close on an empty tray, reporting 02, before it
+    // reports no disc. 3.2 s, as a JVC ENR-013A looks, unconfirmed for other drives.
+    uint32_t search_cycles = 64'000'000;
 };
 
 // A track: its first frame address and its control/ADR byte, bit 6 set for data.
@@ -224,7 +241,7 @@ class DiscDrive final : public Drive
     }
     // The drive's power-on state: paused at the first frame address at double speed, its first
     // link frame a sector period away. The disc and the tray stay: an open tray reports open and
-    // a drive without a disc none.
+    // a drive without a disc none, at once, their first link frame idle_frame_cycles away.
     void reset(uint64_t now) override;
     uint64_t due() const override
     {
@@ -245,9 +262,9 @@ class DiscDrive final : public Drive
         return present;
     }
     // Opens or closes the tray. Opening stops the drive where it is. Closing starts it as at
-    // power-on, or reporting no disc without one. The link frames keep their times. An opening is
-    // reported in three link frames at the least: a tray closed before that still reports open
-    // and obeys nothing in them, and starts with the link frame after.
+    // power-on, or without a disc looks for one first. The link frame due keeps its time. An
+    // opening is reported in three link frames at the least: a tray closed before that still
+    // reports open and obeys nothing in them, and starts with the link frame after.
     void set_tray(bool open);
     // Puts the disc in or takes it out, through an open tray. Taking it out clears its tracks,
     // sectors, subcode and sector states. The providers stay with the drive.
@@ -300,6 +317,9 @@ class DiscDrive final : public Drive
     // from staging a command of its own to the link frame after the one that carries it, which
     // can pass two reports by.
     static constexpr unsigned open_reports = 3;
+    // The link frames that report 12 after a close on an empty tray, before the search's 02, as a
+    // JVC ENR-013A sends them, unconfirmed for other drives.
+    static constexpr unsigned closed_reports = 2;
     enum class Mode
     {
         Toc,
@@ -309,7 +329,8 @@ class DiscDrive final : public Drive
         Stopped,
         Open,
         Empty,
-        Ring
+        Ring,
+        Search
     };
     struct Span
     {
@@ -325,12 +346,16 @@ class DiscDrive final : public Drive
     uint32_t lead_out = latest_lead_out;
     std::vector<Span> spans;
     // Whether a disc is in. The tray is open in Mode::Open, and closed without a disc in
-    // Mode::Empty.
+    // Mode::Search and Mode::Empty.
     bool present = true;
     // The link frames that still have to report an opening, and a tray the caller closed before
     // they did: the drive stays in Mode::Open until they have gone out.
     unsigned unreported = 0;
     bool closing = false;
+    // In Mode::Search, the link frames that still report 12, and when the search ends, 0 until
+    // its first link frame of 02.
+    unsigned unsearched = 0;
+    uint64_t search_until = 0;
     RingProvider ring_provider;
     SectorProvider sector_provider;
     SubcodeProvider subcode_provider;
@@ -357,9 +382,22 @@ class DiscDrive final : public Drive
     {
         return config.sector_cycles / speed;
     }
-    // The state a closed tray starts in: paused at the first frame address at double speed, or
-    // without a disc reporting none.
+    // Whether no disc turns: the tray open, the drive looking for a disc or without one.
+    bool idle() const
+    {
+        return mode == Mode::Open || mode == Mode::Search || mode == Mode::Empty;
+    }
+    // From one link frame to the next: a sector period while a disc turns, idle_frame_cycles while
+    // none does.
+    uint64_t frame_period() const
+    {
+        return idle() ? config.idle_frame_cycles : period();
+    }
+    // The state a closed tray starts in at power-on: paused at the first frame address at double
+    // speed, or without a disc reporting none.
     void start();
+    // The state a tray that closes starts in: as at power-on, or without a disc looking for one.
+    void close_tray();
     // Stops the drive where it is with its tray open, the opening still to report.
     void open_tray();
     void tick(DrivePort &port, uint64_t now);

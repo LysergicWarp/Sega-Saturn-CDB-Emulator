@@ -530,11 +530,15 @@ lead-out: up to 99 tracks, each with its start and control/ADR byte.
 
 Link frames:
 
-- Every sector period, 1/75 s at single speed and half that at double, the drive starts a link
-  frame with its report. Its strobes come a fixed number of cycles apart.
+- While a disc turns, every sector period, 1/75 s at single speed and half that at double, the
+  drive starts a link frame with its report. Its strobes come a fixed number of cycles apart.
+- A stopped drive with a disc keeps the sector period, unconfirmed.
+- With the tray open, the drive looking for a disc or without one, a link frame comes every
+  `idle_frame_cycles`: 16.626 ms by default, as a JVC ENR-013A starts them.
 - Link frames go on in every state, so the SH-1 can always send a command.
 - The drive starts paused at frame address 150 at double speed. Its first link frame comes a sector
-  period after it is selected or the board resets.
+  period after it is selected or the board resets, or `idle_frame_cycles` after with the tray open
+  or empty.
 - SCI0's transfers take their bits at the rate SMR and BRR set, 3200 cycles a byte at the
   firmware's 50,000 bit/s.
 - A transfer still running when the drive strobes again, or ends the link frame, is logged as
@@ -550,7 +554,7 @@ Drive commands, each taking effect when its link frame ends:
 - Byte 10 at 1 or 2 sets single or double speed. Whether a real drive takes the byte as its speed
   is unknown, so this is unconfirmed.
 - A command with a bad sum is logged and not obeyed, as is any command while the tray is open and
-  any but `0c` while the drive has no disc. An unknown command fails the board.
+  any but `0c` while the drive has no disc or looks for one. An unknown command fails the board.
 
 Seeks and reads:
 
@@ -711,8 +715,12 @@ The tray and the disc:
 - What the caller gives after taking the disc out is the new disc's. Given without that, it adds
   to the disc that is in.
 - Closing on a disc starts the drive as it starts when selected, paused at frame address 150 at
-  double speed. Closing on an empty tray reports status `83`, and the drive then obeys only `0c`.
-- The link frames keep their times through an opening and a closing.
+  double speed.
+- Closing on an empty tray reports status `12` in two link frames, then `02` while the drive looks
+  for a disc for `search_cycles`, 3.2 s by default, then `83`, as a JVC ENR-013A does. The drive
+  obeys only `0c` through all of it.
+- The link frame due when the tray opens or closes keeps its time. The ones after it follow the new
+  state's period.
 - Every opening is reported in three link frames at the least, where a real tray stays open far
   longer. A tray closed sooner still reports status `80` in them, obeys no command and starts with
   the link frame after. For the caller the tray is closed from the call on.
@@ -720,9 +728,12 @@ The tray and the disc:
   bits, as the caller's calls and `0c` left them, or -1 when the drive is not the disc drive.
 - The tray and the disc are the caller's, so these calls work on a failed board too.
 - The tray and the disc stay through the board's reset, an open tray open, and a clone has both.
+  A drive closed on an empty tray reports `83` from its first link frame after the reset, during
+  its search too.
 - The CDB105 firmware answers status `80` by dropping what it knew of the disc, raising DCHG and
-  giving the host status 6, OPEN. After the close it reads the TOC again, or gives the host status
-  7, NODISC, for status `83`
+  giving the host status 6, OPEN. After a close on a disc it reads the TOC again. After one on an
+  empty tray it sends `03` for the `12`, which the drive does not obey, holds host status 0 while
+  the drive looks, and gives the host status 7, NODISC, for status `83`
   ([tray and disc states](https://github.com/LysergicWarp/Sega-Saturn-CDblock-Reverse-Engineering-Documentation/blob/main/docs/cdblock/drive.md#tray-and-disc-states)).
 - A play the host asks for while the tray is open makes the firmware send `03`, which the open
   drive does not obey. The firmware keeps the request and carries it out on the disc the tray
@@ -739,12 +750,16 @@ The tray and the disc:
   An opening reported once or twice can fall to that, which is why the drive reports it three
   times: the firmware then sees a disc changed in one go with one such command on its way. Two of
   them in quick succession are not tested.
-- Unconfirmed: the reports a real drive sends after its tray closes, their order and how long each
-  lasts. A drive has to spin up and look for a disc first, and here the first link frame after the
-  close, or after the opening's three, already reports paused or no disc. Also what a drive obeys
-  with its tray open or without a disc, the bytes after the status in reports `80` and `83` (zeros
-  here), whether a drive with an open tray reports it from its first link frame after a reset, and
-  what `0c` does in a drive whose lid opens by hand.
+- A JVC ENR-013A sends zeros after the status in reports `80`, `83`, `12` and `02`, and reports an
+  open tray from its first link frame after power-on, as this drive does. The two link frames of
+  `12` and the defaults of `idle_frame_cycles` and `search_cycles` are that drive's, unconfirmed
+  for others.
+- Unconfirmed: whether a drive reports its open tray from its first link frame after a reset, and
+  what one closed on an empty tray reports after a reset. Also the reports a real drive sends after
+  its tray closes on a disc, their order and how long each lasts: here the first link frame after
+  the close, or after the opening's three, already reports paused. And what a drive obeys with its
+  tray open, without a disc or while it looks for one, and what `0c` does in a drive whose lid
+  opens by hand.
 
 The landing:
 
@@ -758,11 +773,11 @@ The landing:
 - The default of 4 frames is the landing of Ymir's drive emulation, a guess for stability and
   speed. Where a real drive lands is unconfirmed.
 
-The reports follow what the firmware accepts. The timing defaults count the SH-1's 20 MHz clock and
-are guesses: 4000 cycles between strobes, above the 3389 that a byte's 3200 and the SH-1's answer
-189 instructions after the strobe need, 1/15 s to seek, 15 frames a period while scanning, and a
-read landing 4 frames early. A real drive's timing and answers
-are not confirmed. The log holds each command but 00, Null, and each report, sector and audio
+The other reports follow what the firmware accepts. The timing defaults count the SH-1's 20 MHz
+clock. `idle_frame_cycles` and `search_cycles` are a JVC ENR-013A's (above). The others are
+guesses: 4000 cycles between strobes, above the 3389 that a byte's 3200 and the SH-1's answer 189
+instructions after the strobe need, 1/15 s to seek, 15 frames a period while scanning, and a read
+landing 4 frames early. A real drive's other timing and answers are not confirmed. The log holds each command but 00, Null, and each report, sector and audio
 sector. A link frame
 the SH-1 did not answer in full carries no command, and the link logs the strobes it missed.
 

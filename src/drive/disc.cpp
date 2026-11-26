@@ -13,8 +13,8 @@ namespace
 {
 
 // The report status bytes, the command bytes and where their fields start, by the tables in disc.h.
-constexpr uint8_t toc_status = 0x04, stopped = 0x12, seek_status = 0x22, playing = 0x36, paused = 0x46, scanning = 0x56,
-                  tray_open = 0x80, no_disc = 0x83, ring = 0xb6;
+constexpr uint8_t search_status = 0x02, toc_status = 0x04, stopped = 0x12, seek_status = 0x22, playing = 0x36,
+                  paused = 0x46, scanning = 0x56, tray_open = 0x80, no_disc = 0x83, ring = 0xb6;
 constexpr uint8_t cmd_none = 0x00, cmd_ring_seek = 0x02, cmd_toc = 0x03, cmd_stop = 0x04, cmd_standby = 0x05,
                   cmd_play = 0x06, cmd_pause = 0x08, cmd_seek = 0x09, cmd_scan_forward = 0x0a, cmd_scan_backward = 0x0b,
                   cmd_open_tray = 0x0c;
@@ -102,6 +102,8 @@ const char *DiscDrive::invalid(const DiscDriveConfig &c)
     // The link frame's strobes and the end of its last transfer, within a sector at double speed.
     if (uint64_t(c.strobe_cycles) * link_frame_size >= c.sector_cycles / 2)
         return "a link frame must end within a sector at double speed";
+    if (uint64_t(c.strobe_cycles) * link_frame_size >= c.idle_frame_cycles)
+        return "a link frame must end within idle_frame_cycles";
     if (c.scan_frames == 0 || c.scan_frames > last_frame_address)
         return "a scan moves at least a frame and at most 449999";
     if (c.landing_frames > last_frame_address)
@@ -124,8 +126,8 @@ const char *DiscDrive::invalid(const std::vector<Track> &list, uint32_t end)
 void DiscDrive::identify(StateIo &io) const
 {
     io.same(uint32_t(Kind::Disc), "another drive");
-    for (const uint32_t setting :
-         {config.sector_cycles, config.strobe_cycles, config.seek_cycles, config.scan_frames, config.landing_frames})
+    for (const uint32_t setting : {config.sector_cycles, config.strobe_cycles, config.seek_cycles, config.scan_frames,
+                                   config.landing_frames, config.idle_frame_cycles, config.search_cycles})
         io.same(setting, "other drive settings");
 }
 
@@ -158,6 +160,9 @@ void DiscDrive::exchange(StateIo &io)
     io.u32(unreported);
     io.require(unreported <= open_reports, "count of open tray reports");
     io.flag(closing);
+    io.u32(unsearched);
+    io.require(unsearched <= closed_reports, "count of reports of a close on an empty tray");
+    io.u64(search_until);
     // The ring seek's answer, the subcode block being sent and the subcode last taken.
     io.u16(ring_answer.word);
     io.bytes(ring_answer.bytes);
@@ -171,7 +176,7 @@ void DiscDrive::exchange(StateIo &io)
     io.u32(taken_address);
     io.flag(taken);
     // Where the drive is and what it does next.
-    const unsigned modes = unsigned(Mode::Ring) + 1;
+    const unsigned modes = unsigned(Mode::Search) + 1;
     io.choice(mode, modes, "drive mode");
     io.choice(arrival, modes, "drive mode");
     io.u32(position);
@@ -207,8 +212,22 @@ void DiscDrive::start()
     seek_until = subcode_at = 0;
     unreported = 0;
     closing = false;
+    unsearched = 0;
+    search_until = 0;
     // The disc may be another one, or its provider serve another, since the sector was taken.
     taken = false;
+}
+
+void DiscDrive::close_tray()
+{
+    start();
+    // Without a disc the drive first looks for one, as a JVC ENR-013A does: 12 in two link frames,
+    // then 02 for search_cycles, then no disc.
+    if (!present)
+    {
+        mode = arrival = Mode::Search;
+        unsearched = closed_reports;
+    }
 }
 
 void DiscDrive::open_tray()
@@ -216,28 +235,32 @@ void DiscDrive::open_tray()
     halt(Mode::Open);
     unreported = open_reports;
     closing = false;
+    // A search cut short by the opening starts again with the next close.
+    unsearched = 0;
+    search_until = 0;
 }
 
 void DiscDrive::reset(uint64_t now)
 {
-    // The tray is not the board's to move, so an open one stays open, unconfirmed: whether a real
-    // drive reports its open tray from the first link frame after a reset is not known.
+    // The tray is not the board's to move, so an open one stays open and reports so from the first
+    // link frame, as a JVC ENR-013A does after power-on, unconfirmed after a reset. A drive closed
+    // on an empty tray reports no disc at once, during its search too, unconfirmed.
     const bool open = tray_opened();
     start();
     if (open)
         mode = Mode::Open;
     step_at = 0;
-    next_tick = now + period();
+    next_tick = now + frame_period();
 }
 
 void DiscDrive::set_tray(bool open)
 {
     if (open == tray_opened())
         return;
-    // The link frames go on at their times either way. A real drive spins up and looks for a disc
-    // after its tray closes, and what it reports until it has found one or given up is not known.
-    // Here the next link frame, or the one after the opening's three, already reports paused at
-    // the first frame address, or no disc: both unconfirmed.
+    // The link frame due keeps its time either way, and the ones after it follow the new state's
+    // period. A real drive spins up and looks for a disc after its tray closes. Here the next link
+    // frame, or the one after the opening's three, already reports paused at the first frame
+    // address, unconfirmed. Without a disc the drive looks for one first (close_tray).
     if (!open)
     {
         // The SH-1 learns of an opening from the reports alone, so a tray closed before the drive
@@ -245,7 +268,7 @@ void DiscDrive::set_tray(bool open)
         if (unreported)
             closing = true;
         else
-            start();
+            close_tray();
     }
     else if (closing)
     {
@@ -292,7 +315,7 @@ void DiscDrive::act(DrivePort &port)
     if (now >= next_tick)
     {
         tick(port, now);
-        next_tick += period();
+        next_tick += frame_period();
     }
 }
 
@@ -300,7 +323,19 @@ void DiscDrive::tick(DrivePort &port, uint64_t now)
 {
     // A tray closed before the drive had reported it open: the link frames have, so it closes.
     if (closing && !unreported)
-        start();
+        close_tray();
+    // The search starts with its first link frame of 02 and ends with the first one at or past
+    // search_cycles from it, which reports no disc.
+    if (mode == Mode::Search && !unsearched)
+    {
+        if (!search_until)
+            search_until = now + config.search_cycles;
+        if (now >= search_until)
+        {
+            mode = arrival = Mode::Empty;
+            search_until = 0;
+        }
+    }
     // A seek arrives with no other motion in that period, unless the drive never finds its frame
     // address.
     if (seeking)
@@ -431,7 +466,7 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
         case Mode::Stopped:
             b[report_status] = stopped;
             break;
-        // Both with zeros after the status, unconfirmed.
+        // These four with zeros after the status, as a JVC ENR-013A sends them.
         case Mode::Open:
             b[report_status] = tray_open;
             if (unreported)
@@ -439,6 +474,17 @@ std::array<uint8_t, Drive::link_frame_size> DiscDrive::report()
             break;
         case Mode::Empty:
             b[report_status] = no_disc;
+            break;
+        case Mode::Search:
+            if (unsearched)
+            {
+                b[report_status] = stopped;
+                --unsearched;
+            }
+            else
+            {
+                b[report_status] = search_status;
+            }
             break;
         case Mode::Ring:
             b[report_status] = ring;
@@ -476,13 +522,14 @@ void DiscDrive::obey(DrivePort &port, const std::vector<uint8_t> &bytes, uint64_
     if (command == cmd_none)
         return;
     // An open tray obeys nothing until the caller closes it, and a drive without a disc only the
-    // tray's opening, unconfirmed: what a real drive obeys in either state is not known.
+    // tray's opening, while it looks for one too, unconfirmed: what a real drive obeys in these
+    // states is not known.
     if (mode == Mode::Open)
     {
         note(", the tray open, not obeyed");
         return;
     }
-    if (mode == Mode::Empty && command != cmd_open_tray)
+    if ((mode == Mode::Empty || mode == Mode::Search) && command != cmd_open_tray)
     {
         note(", no disc, not obeyed");
         return;

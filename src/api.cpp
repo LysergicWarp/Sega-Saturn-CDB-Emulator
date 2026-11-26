@@ -475,7 +475,8 @@ int cdblock_drive_select(cdblock_board *b, int kind)
 void cdblock_drive_config_defaults(cdblock_drive_config *config)
 {
     const cdblock::DiscDriveConfig d;
-    *config = {d.sector_cycles, d.strobe_cycles, d.seek_cycles, d.scan_frames, d.landing_frames};
+    *config = {d.sector_cycles,  d.strobe_cycles,     d.seek_cycles,  d.scan_frames,
+               d.landing_frames, d.idle_frame_cycles, d.search_cycles};
 }
 
 int cdblock_drive_select_disc(cdblock_board *b, const cdblock_drive_config *config)
@@ -486,8 +487,8 @@ int cdblock_drive_select_disc(cdblock_board *b, const cdblock_drive_config *conf
         return fail(b, "the disc drive keeps its time on the clock, and the board has none");
     cdblock::DiscDriveConfig c;
     if (config)
-        c = {config->sector_cycles, config->strobe_cycles, config->seek_cycles, config->scan_frames,
-             config->landing_frames};
+        c = {config->sector_cycles,  config->strobe_cycles,     config->seek_cycles,  config->scan_frames,
+             config->landing_frames, config->idle_frame_cycles, config->search_cycles};
     if (const char *why = cdblock::DiscDrive::invalid(c))
         return fail(b, why);
     b->board->set_drive(std::make_unique<cdblock::DiscDrive>(c, b->board->cycles()));

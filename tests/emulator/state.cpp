@@ -837,12 +837,21 @@ void disc_step(const Board &b, uint32_t step)
     case 70:
         stage(b, 0x06, 150, 2);
         break;
+    case 74: // the tray closed on an empty tray, where the drive looks for a disc, then reports none
+        cdblock_drive_disc_tray(b, 1);
+        break;
+    case 75:
+        cdblock_drive_disc_present(b, 0);
+        break;
+    case 77:
+        cdblock_drive_disc_tray(b, 0);
+        break;
     default:
         break;
     }
 }
 
-constexpr uint32_t disc_steps = 78;
+constexpr uint32_t disc_steps = 100;
 
 // The steps the clock has reached since the last one taken, which the board's RAM holds.
 void disc_act(const Board &b)
@@ -894,6 +903,7 @@ cdblock_drive_config disc_config()
     config.seek_cycles = 400'000;
     config.landing_frames = 2;
     config.scan_frames = 7;
+    config.search_cycles = 800'000;
     return config;
 }
 
@@ -963,7 +973,8 @@ void disc()
     disc_setup(b);
     disc_setup(ref);
     unsigned in_link_frame = 0, seeking = 0, reading = 0, tray_open = 0, no_disc = 0, closing = 0;
-    for (unsigned i = 0; i < 600 && cdblock_clock_cycles(ref) < disc_steps * sector_period; ++i)
+    unsigned closed_empty = 0, searching = 0;
+    for (unsigned i = 0; i < 800 && cdblock_clock_cycles(ref) < disc_steps * sector_period; ++i)
     {
         // What the save catches the drive in, by the board whose log has only the walk's entries.
         const int sent = cdblock_link_sent(ref, nullptr, 0), disc_state = cdblock_drive_disc_state(ref);
@@ -971,6 +982,9 @@ void disc()
         in_link_frame += sent > 0 && sent < 13;
         seeking += status == 0x22;
         reading += status == 0x36;
+        // The 12 of a tray closed on an empty tray, and the search's 02.
+        closed_empty += status == 0x12 && disc_state == 0;
+        searching += status == 0x02;
         tray_open += (disc_state & CDBLOCK_DISC_TRAY_OPEN) != 0;
         no_disc += !(disc_state & CDBLOCK_DISC_PRESENT);
         // A tray the caller has closed while the drive still reports it open.
@@ -982,10 +996,12 @@ void disc()
         round_trip(b, ref, i, later, make);
     }
     // The walk came through the script, with saves in a link frame, a seek, a read with its
-    // subcode blocks, an open tray with and without a disc and one still closing, and it played
-    // audio.
+    // subcode blocks, an open tray with and without a disc and one still closing, a close on an
+    // empty tray and the search after it, which ended in no disc, and it played audio.
     CHECK(cdblock_clock_cycles(ref) >= disc_steps * sector_period && cdblock_clock_advance(ref, 1) == 0);
     CHECK(in_link_frame && seeking && reading && tray_open && no_disc && closing && played);
+    CHECK(closed_empty && searching);
+    CHECK(last_report(ref) == 0x83);
     CHECK(!ref.log(CDBLOCK_LOG_DRIVE_AUDIO).empty() && ref.log(CDBLOCK_LOG_DRIVE_SECTOR).size() > 10);
     // The first read passed the missing sector, which the drive hands over nothing of, and the
     // unreadable one.
@@ -1449,7 +1465,9 @@ void refused()
         for (const auto change :
              {+[](cdblock_drive_config &c) { ++c.sector_cycles; }, +[](cdblock_drive_config &c) { ++c.strobe_cycles; },
               +[](cdblock_drive_config &c) { ++c.seek_cycles; }, +[](cdblock_drive_config &c) { ++c.scan_frames; },
-              +[](cdblock_drive_config &c) { ++c.landing_frames; }})
+              +[](cdblock_drive_config &c) { ++c.landing_frames; },
+              +[](cdblock_drive_config &c) { ++c.idle_frame_cycles; },
+              +[](cdblock_drive_config &c) { ++c.search_cycles; }})
         {
             cdblock_drive_config config;
             cdblock_drive_config_defaults(&config);
@@ -1545,7 +1563,8 @@ void values()
         // The disc drive's fields end with: whether it scans backward and whether it seeks, the
         // TOC entry, the speed, three times, the seek's target, the position, the mode a seek
         // arrives in and the mode. Before them the subcode it took last, the block it sends, the
-        // ring seek's answer and the tray's fields, and before those the last sector state given.
+        // ring seek's answer, the search's fields and the tray's, and before those the last sector
+        // state given.
         Board b(p, &disc_options);
         const cdblock_drive_config config = disc_config();
         CHECK(cdblock_drive_select_disc(b, &config) == 0);
@@ -1556,15 +1575,17 @@ void values()
         const auto back = [&](size_t width) { return at -= width; };
         const size_t seeking = back(1), speed = back(4 + 4), target = back(24 + 4), position = back(4);
         const size_t arrival = back(1), mode = back(1), block_frame = back(1 + 4 + 96 + 4);
-        const size_t unreported = back(24 + 96 + 6 + 1 + 4), sector_state = back(1 + 2 + 1);
+        const size_t unsearched = back(24 + 96 + 6 + 8 + 4), unreported = back(1 + 4);
+        const size_t sector_state = back(1 + 2 + 1);
         refuses(b, state, seeking, 2, "flag");
         refuses(b, state, speed, 0, "drive speed");
         refuses(b, state, speed, 3, "drive speed");
         refuses(b, state, target + 2, 0x10, "frame address");
         refuses(b, state, position + 2, 0x10, "frame address");
-        refuses(b, state, arrival, 8, "drive mode");
-        refuses(b, state, mode, 8, "drive mode");
+        refuses(b, state, arrival, 9, "drive mode");
+        refuses(b, state, mode, 9, "drive mode");
         refuses(b, state, block_frame, 99, "subcode frame");
+        refuses(b, state, unsearched, 3, "count of reports of a close on an empty tray");
         refuses(b, state, unreported, 4, "count of open tray reports");
         refuses(b, state, sector_state, 4, "sector state");
         // The tracks, found by their bytes: two of them and the lead-out at 1200, which then lies

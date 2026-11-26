@@ -315,6 +315,12 @@ typedef struct cdblock_drive_config
     uint32_t seek_cycles;    /* from a seek, read or ring seek to its frame address: 1333333 */
     uint32_t scan_frames;    /* frames a scan moves each sector period: 15. At most 449999 */
     uint32_t landing_frames; /* frames before a read's frame address where it arrives: 4. At most 449999 */
+    /* From one link frame to the next while no disc turns, the tray open, the drive looking for a
+     * disc or without one: 332520, 16.626 ms. 13 strobes within it. */
+    uint32_t idle_frame_cycles;
+    /* How long the drive looks for a disc after a close on an empty tray: 64000000, 3.2 s. Both
+     * defaults are a JVC ENR-013A's, unconfirmed for other drives. */
+    uint32_t search_cycles;
 } cdblock_drive_config;
 CDBLOCK_EXPORT void cdblock_drive_config_defaults(cdblock_drive_config *config);
 /* config NULL for the defaults. */
@@ -438,9 +444,15 @@ CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdb
  * - The contents given after the disc is taken out are the new disc's. Without that they add to
  *   the disc that is in. Those calls work with the tray closed too.
  * - Closing with a disc starts the drive as at power-on, paused at the first frame address at
- *   double speed, which makes the firmware read the TOC. Closing without one reports status 83,
- *   and the drive then obeys only command 0c.
- * - The link frames keep their times through an opening and a closing.
+ *   double speed, which makes the firmware read the TOC. Closing without one reports status 12 in
+ *   two link frames, then 02 while the drive looks for a disc for search_cycles, then 83. The
+ *   drive obeys only command 0c through all of it. The CDB105 firmware sends 03 for the 12, which
+ *   the drive does not obey.
+ * - With the tray open, the drive looking for a disc or without one, a link frame comes every
+ *   idle_frame_cycles, otherwise every sector period, a stopped drive with a disc included,
+ *   unconfirmed. The link frame due when the tray opens or closes keeps its time, and the ones
+ *   after it follow the new state's period. After the drive is selected or the board resets, its
+ *   first link frame comes one such period away.
  * - Every opening is reported in three link frames at the least, where a real tray stays open
  *   far longer. A tray closed sooner still reports status 80 in them, obeys no command and starts
  *   with the link frame after. The CDB105 firmware takes no report while a drive command of its
@@ -455,12 +467,18 @@ CDBLOCK_EXPORT int cdblock_drive_disc_subcode_provider(cdblock_board *board, cdb
  *   tray open and closes it.
  * - The tray and the disc are the caller's, so these calls work on a failed board too.
  * - The tray and the disc stay through the board's reset, an open tray open, and a clone has both.
- * - Unconfirmed: the reports a real drive sends after its tray closes, their order and how long
- *   each lasts. A drive has to spin up and look for a disc first, and here the first link frame
- *   after the close, or after the opening's three, already reports paused or no disc. Also what a
- *   drive obeys with its tray open or without a disc, the bytes after the status in reports 80
- *   and 83 (zeros here), whether a drive with an open tray reports it from its first link frame
- *   after a reset, and what command 0c does in a drive whose lid opens by hand. */
+ *   A drive closed on an empty tray reports 83 from its first link frame after the reset, during
+ *   its search too.
+ * - A JVC ENR-013A closed on an empty tray reports as here, and sends zeros after the status in
+ *   reports 80, 83, 12 and 02. It reports an open tray from its first link frame after power-on,
+ *   as this drive does. The two link frames of 12 and the defaults of idle_frame_cycles and
+ *   search_cycles are that drive's, unconfirmed for others.
+ * - Unconfirmed: whether a drive reports its open tray from its first link frame after a reset,
+ *   and what one closed on an empty tray reports after a reset. Also the reports a real drive
+ *   sends after its tray closes on a disc, their order and how long each lasts: here the first
+ *   link frame after the close, or after the opening's three, already reports paused. And what a
+ *   drive obeys with its tray open, without a disc or while it looks for one, and what command 0c
+ *   does in a drive whose lid opens by hand. */
 #define CDBLOCK_DISC_TRAY_OPEN 1
 #define CDBLOCK_DISC_PRESENT 2
 CDBLOCK_EXPORT int cdblock_drive_disc_tray(cdblock_board *board, int open);

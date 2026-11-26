@@ -39,7 +39,7 @@ class Strobe(ctypes.Structure):
 
 class DriveConfig(ctypes.Structure):
     _fields_ = [("sector_cycles", u32), ("strobe_cycles", u32), ("seek_cycles", u32), ("scan_frames", u32),
-                ("landing_frames", u32)]
+                ("landing_frames", u32), ("idle_frame_cycles", u32), ("search_cycles", u32)]
 
 
 class Track(ctypes.Structure):

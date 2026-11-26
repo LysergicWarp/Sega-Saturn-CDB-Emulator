@@ -299,8 +299,8 @@ class Board:
 
     def drive_select_disc(self, **settings):
         """The disc drive, which answers link commands by itself on the clock. settings name fields
-        of the drive configuration, sector_cycles, strobe_cycles, seek_cycles, scan_frames and
-        landing_frames, the others keeping their defaults."""
+        of the drive configuration, sector_cycles, strobe_cycles, seek_cycles, scan_frames,
+        landing_frames, idle_frame_cycles and search_cycles, the others keeping their defaults."""
         config = b.DriveConfig()
         self.lib.cdblock_drive_config_defaults(ctypes.byref(config))
         fields = {field for field, _ in b.DriveConfig._fields_}
@@ -409,8 +409,10 @@ class Board:
     def drive_disc_tray(self, opened):
         """The disc drive's tray opens or closes. Open, the drive stops where it is, reports status
         80 and obeys no command. Closed on a disc it starts as at power-on, paused at the first
-        frame address, and closed on none it reports status 83. An opening is reported in three
-        link frames at the least, which a tray closed sooner still sends before it starts."""
+        frame address. Closed on none it reports status 12 in two link frames, then 02 while it
+        looks for a disc for search_cycles, then 83, obeying only command 0c. An opening is
+        reported in three link frames at the least, which a tray closed sooner still sends before
+        it starts."""
         self._ok(self.lib.cdblock_drive_disc_tray(self.handle, 1 if opened else 0))
 
     def drive_disc_present(self, present):

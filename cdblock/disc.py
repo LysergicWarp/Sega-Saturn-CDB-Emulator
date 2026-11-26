@@ -1,12 +1,13 @@
 """A disc in the drive, for firmware the harness has a profile for.
 
 The drive is the library's disc drive: it answers the SH-1's link commands by itself on the board's
-clock, a link frame with a report each sector period, the sectors of a read through the decoder
-input and DMA channel 0. The host waits on what the SH-1 writes, skipping the clock on at the
-firmware's idle loop to the board's next event, so the idle time it skips costs no instructions.
-While the drive reads, each subcode frame it sends is such an event and costs one pass of the idle
-loop, 97 a sector besides the sector itself. Nothing here names a firmware address, but the idle
-loop needs a profile: on any other dump the disc operations are not supported.
+clock, a link frame with a report each sector period, or each 16.626 ms by default with the tray
+open or no disc, the sectors of a read through the decoder input and DMA channel 0. The
+host waits on what the SH-1 writes, skipping the clock on at the firmware's idle loop to the
+board's next event, so the idle time it skips costs no instructions. While the drive reads, each
+subcode frame it sends is such an event and costs one pass of the idle loop, 97 a sector besides
+the sector itself. Nothing here names a firmware address, but the idle loop needs a profile: on
+any other dump the disc operations are not supported.
 
 By default the disc has one data track from 00:02:00 with a Saturn header at its first frame
 address. Its tracks, their pregaps and index marks, the header's frame address, sectors that are
@@ -19,14 +20,17 @@ so the ring is there for any count, as on a pressed disc. The drive answers each
 seek as Yabause's emulation does, with values that pass the seek checks, unless the disc has seek
 answers of its own: failing, passing or scripted, below.
 
-None of the drive's behaviour comes from a real drive. Its reports follow what the firmware
+Little of the drive's behaviour comes from a real drive. Its reports follow what the firmware
 accepts, its seek answers are Yabause's or the disc's own and its timing is the library's defaults
-unless settings change it. How often a real drive sends link frames, how far its reports lag its
-sectors and whether a pressed disc holds these sectors at the check positions are unknown.
+unless settings change it. How often a real drive sends link frames with a disc in, how far its
+reports lag its sectors and whether a pressed disc holds these sectors at the check positions are
+unknown.
 
 The tray opens and closes, and the disc changes while it is open: open_tray, change and close_tray
-below. What a real drive reports after its tray closes, and what it obeys while the tray is open or
-empty, is unconfirmed: here a closed tray reports paused or no disc from its first link frame.
+below. Closed on an empty tray the drive looks for a disc for 3.2 s before it reports none, as a
+JVC ENR-013A does. What a real drive reports after its tray closes on a disc, and what it obeys
+while the tray is open or empty, is unconfirmed: here a tray closed on a disc reports paused from
+its first link frame.
 """
 import hashlib
 

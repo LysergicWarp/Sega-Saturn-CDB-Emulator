@@ -10,7 +10,7 @@ namespace
 {
 
 const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
-constexpr uint64_t double_speed = 133'333, single_speed = 266'667, strobe = 4'000;
+constexpr uint64_t double_speed = 133'333, single_speed = 266'667, strobe = 4'000, idle = 332'520;
 
 uint8_t bcd(uint32_t value)
 {
@@ -195,6 +195,7 @@ void disc_drive_select()
     cdblock_drive_config_defaults(&config);
     CHECK(config.sector_cycles == single_speed && config.strobe_cycles == strobe);
     CHECK(config.seek_cycles == 1'333'333 && config.scan_frames == 15 && config.landing_frames == 4);
+    CHECK(config.idle_frame_cycles == idle && config.search_cycles == 64'000'000);
     // Settings the drive cannot run with.
     auto refused = [&](cdblock_drive_config c, const char *why) {
         CHECK(cdblock_drive_select_disc(b, &c) == -1 && contains(b.error(), why));
@@ -213,10 +214,15 @@ void disc_drive_select()
     c = config;
     c.landing_frames = 450'000;
     refused(c, "lands");
-    // The bounds themselves are allowed.
+    c = config;
+    c.idle_frame_cycles = uint32_t(13 * strobe);
+    refused(c, "within idle_frame_cycles");
+    // The bounds themselves are allowed, and a search of no time.
     for (auto set : {+[](cdblock_drive_config &s) { s.strobe_cycles = 10'256; },
                      +[](cdblock_drive_config &s) { s.scan_frames = 449'999; },
-                     +[](cdblock_drive_config &s) { s.landing_frames = 449'999; }})
+                     +[](cdblock_drive_config &s) { s.landing_frames = 449'999; },
+                     +[](cdblock_drive_config &s) { s.idle_frame_cycles = uint32_t(13 * strobe + 1); },
+                     +[](cdblock_drive_config &s) { s.search_cycles = 0; }})
     {
         c = config;
         set(c);
@@ -1429,7 +1435,7 @@ void disc_drive_tray()
     CHECK(cdblock_drive_disc_sector(b, 1002, raw, sizeof raw) == 0);
 
     // Opening the tray during a read stops the sectors and the subcode at once. The next report is
-    // 80, at the link frames' own time.
+    // 80, at the time that link frame was due. The ones after it come idle_frame_cycles apart.
     CHECK(command(peer, 0x06, 1000) == q(0x36, 1000));
     peer.link_frame();
     const uint64_t reading = peer.strobes.front();
@@ -1443,26 +1449,34 @@ void disc_drive_tray()
     CHECK(bare(command(peer, 0x09, 600), 0x80));
     CHECK(contains(b.log(CDBLOCK_LOG_DRIVE_COMMAND).back().text, "tray open"));
     CHECK(cdblock_drive_disc_tray(b, 1) == 0 && bare(peer.link_frame(), 0x80));
+    CHECK(peer.strobes.front() == reading + double_speed + 3 * idle);
     // Closing it with the disc in starts the drive as at power-on, paused at the first frame
-    // address, with the link frames at their times and commands obeyed again.
+    // address, and commands are obeyed again. The link frame due keeps its time, and the ones
+    // after it come a sector period apart.
     const uint64_t open = peer.strobes.front();
     CHECK(cdblock_drive_disc_tray(b, 0) == 0);
-    CHECK(peer.link_frame() == q(0x46, 150) && peer.strobes.front() == open + double_speed);
+    CHECK(peer.link_frame() == q(0x46, 150) && peer.strobes.front() == open + idle);
+    CHECK(peer.link_frame() == q(0x46, 150) && peer.strobes.front() == open + idle + double_speed);
     CHECK(cdblock_drive_disc_tray(b, 0) == 0 && command(peer, 0x09, 600) == q(0x46, 600));
     // Command 0c opens it too, here at single speed, and the caller closes it again: the drive is
-    // back at double speed.
+    // back at double speed. The link frame due after the 0c keeps its time and the opening's
+    // others come idle_frame_cycles apart. From the start they come a sector period apart.
     peer.stage(0x0c, 0, 1);
     peer.link_frame();
+    const uint64_t opened = peer.strobes.front();
     CHECK(cdblock_drive_disc_state(b) == (open_tray | disc_in));
-    CHECK(reported_open(peer) && cdblock_drive_disc_tray(b, 0) == 0);
-    CHECK(peer.link_frame() == q(0x46, 150));
+    for (uint64_t frame = 0; frame < 3; ++frame)
+        CHECK(bare(peer.link_frame(), 0x80) && peer.strobes.front() == opened + double_speed + frame * idle);
+    CHECK(cdblock_drive_disc_tray(b, 0) == 0);
+    CHECK(peer.link_frame() == q(0x46, 150) && peer.strobes.front() == opened + double_speed + 3 * idle);
     const uint64_t closed = peer.strobes.front();
     peer.link_frame();
     CHECK(peer.strobes.front() == closed + double_speed);
 
     // A tray opened and closed with no link frame between is closed for the caller from the call
-    // on. The drive still reports the opening in the next three link frames, at their times,
-    // obeys nothing in them and starts with the one after.
+    // on. The drive still reports the opening in the next three link frames, the first at its
+    // time and the others idle_frame_cycles apart, obeys nothing in them and starts with the one
+    // after.
     const cdblock_track two[2] = {{150, 0x41}, {1000, 0x01}};
     CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_tracks(b, two, 2, 2000) == 0);
     CHECK(cdblock_drive_disc_tray(b, 0) == 0 && cdblock_drive_disc_state(b) == disc_in);
@@ -1478,13 +1492,13 @@ void disc_drive_tray()
         CHECK(cdblock_drive_disc_state(copy) == disc_in && reported_open(copied));
         CHECK(copied.link_frame() == q(0x46, 150));
     }
-    for (uint64_t frame = 2; frame < 5; ++frame)
+    for (uint64_t frame = 0; frame < 3; ++frame)
     {
         peer.stage(0x09, 600, 2);
-        CHECK(bare(peer.link_frame(), 0x80) && peer.strobes.front() == closed + frame * double_speed);
+        CHECK(bare(peer.link_frame(), 0x80) && peer.strobes.front() == closed + 2 * double_speed + frame * idle);
         CHECK(contains(b.log(CDBLOCK_LOG_DRIVE_COMMAND).back().text, "tray open"));
     }
-    CHECK(peer.link_frame() == q(0x46, 150) && peer.strobes.front() == closed + 5 * double_speed);
+    CHECK(peer.link_frame() == q(0x46, 150) && peer.strobes.front() == closed + 2 * double_speed + 3 * idle);
     CHECK(peer.link_frame() == q(0x46, 150));
     // A tray closed after one of those reports closes after the other two.
     CHECK(cdblock_drive_disc_tray(b, 1) == 0 && bare(peer.link_frame(), 0x80));
@@ -1514,20 +1528,37 @@ void disc_drive_tray()
     // Closing a closed tray leaves the read going.
     CHECK(cdblock_drive_disc_tray(b, 0) == 0 && peer.link_frame()[0] == 0x36);
 
-    // Closing the tray without a disc reports 83 in every link frame after the opening's, and the
-    // drive obeys only command 0c.
+    // The tray opened, the disc taken out and the opening reported, then the tray closed on
+    // nothing: 12 in the link frame due and the one after, then 02 while the drive looks for a
+    // disc for search_cycles, then 83, a link frame every idle_frame_cycles. The drive obeys only
+    // command 0c through all of it: not the 03 the firmware sends for the 12, nor a seek during
+    // the search.
     CHECK(cdblock_drive_disc_sector_state(b, 1003, 1, CDBLOCK_SECTOR_MISSING, 0) == 0);
     CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_present(b, 0) == 0);
-    CHECK(cdblock_drive_disc_state(b) == open_tray);
+    CHECK(cdblock_drive_disc_state(b) == open_tray && reported_open(peer));
+    const uint64_t reported = peer.strobes.front();
     CHECK(cdblock_drive_disc_tray(b, 0) == 0 && cdblock_drive_disc_state(b) == 0);
-    CHECK(reported_open(peer));
-    for (int i = 0; i < 3; ++i)
-        CHECK(bare(peer.link_frame(), 0x83));
+    CHECK(bare(peer.link_frame(), 0x12) && peer.strobes.front() == reported + idle);
+    const uint64_t closed_empty = peer.strobes.front();
+    peer.stage(0x03, 0x010000, 2);
+    CHECK(bare(peer.link_frame(), 0x12) && peer.strobes.front() == closed_empty + idle);
+    CHECK(contains(b.log(CDBLOCK_LOG_DRIVE_COMMAND).back().text, "no disc, not obeyed"));
+    peer.stage(0x09, 600, 2);
+    CHECK(bare(peer.link_frame(), 0x02) && peer.strobes.front() == closed_empty + 2 * idle);
+    CHECK(contains(b.log(CDBLOCK_LOG_DRIVE_COMMAND).back().text, "no disc, not obeyed"));
+    const uint64_t search = peer.strobes.front();
+    // The search's link frames up to the first at or past search_cycles from its first.
+    const uint64_t searches = (config.search_cycles + idle - 1) / idle;
+    for (uint64_t frame = 1; frame < searches; ++frame)
+        CHECK(bare(peer.link_frame(), 0x02) && peer.strobes.front() == search + frame * idle);
+    CHECK(bare(peer.link_frame(), 0x83) && peer.strobes.front() == search + searches * idle);
+    CHECK(bare(peer.link_frame(), 0x83) && peer.strobes.front() == search + (searches + 1) * idle);
     CHECK(bare(command(peer, 0x03, 0x010000), 0x83));
     CHECK(contains(b.log(CDBLOCK_LOG_DRIVE_COMMAND).back().text, "no disc, not obeyed"));
     CHECK(cdblock_drive_disc_present(b, 1) == -1 && contains(b.error(), "tray is closed"));
-    // The board's reset leaves the drive without its disc, and a copy has none either.
-    CHECK(cdblock_reset(b) == 0);
+    // The board's reset leaves the drive without its disc, its first link frame idle_frame_cycles
+    // away, and a copy has none either.
+    CHECK(cdblock_reset(b) == 0 && cdblock_clock_next(b) == idle);
     sci0(b);
     CHECK(bare(peer.link_frame(), 0x83));
     cdblock_board *raw_copy = cdblock_clone(b);
@@ -1539,11 +1570,14 @@ void disc_drive_tray()
         Peer copied(copy, nullptr, false);
         CHECK(bare(copied.link_frame(), 0x83));
     }
-    // Command 0c opens the tray of a drive without a disc, and a disc goes in.
+    // Command 0c opens the tray of a drive without a disc, and of one that looks for a disc. Then a
+    // disc goes in.
+    CHECK(bare(command(peer, 0x0c, 0), 0x80) && cdblock_drive_disc_tray(b, 0) == 0);
+    CHECK(bare(peer.link_frame(), 0x80) && bare(peer.link_frame(), 0x80) && bare(peer.link_frame(), 0x12));
     CHECK(bare(command(peer, 0x0c, 0), 0x80) && cdblock_drive_disc_present(b, 1) == 0);
-    // An open tray stays open through the board's reset. A copy's is open too, and closing the
-    // copy's leaves the original's open.
-    CHECK(cdblock_reset(b) == 0);
+    // An open tray stays open through the board's reset, its first link frame idle_frame_cycles
+    // away. A copy's is open too, and closing the copy's leaves the original's open.
+    CHECK(cdblock_reset(b) == 0 && cdblock_clock_next(b) == idle);
     sci0(b);
     CHECK(bare(peer.link_frame(), 0x80));
     raw_copy = cdblock_clone(b);
@@ -1597,6 +1631,88 @@ void disc_drive_tray()
     CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_present(b, 0) == 0);
     CHECK(cdblock_drive_disc_state(b) == open_tray && cdblock_reset(b) == 0);
     CHECK(cdblock_drive_disc_state(b) == open_tray);
+}
+
+// The search after a close on an empty tray, cut short by command 0c, an opening and the board's
+// reset, and a search of no time.
+void disc_drive_search()
+{
+    Program p;
+    p.loop();
+    Board b(p, &clocked);
+    cdblock_drive_config config;
+    cdblock_drive_config_defaults(&config);
+    // Three link frames of 02.
+    config.search_cycles = uint32_t(2 * idle + 1);
+    Peer peer(b, &config);
+    const auto bare = [](const std::vector<uint8_t> &got, uint8_t status) {
+        return summed(got) && got[0] == status &&
+               std::all_of(got.begin() + 1, got.begin() + 11, [](uint8_t byte) { return byte == 0; });
+    };
+    const auto command = [&](uint8_t code) {
+        peer.stage(code, 0, 2);
+        peer.link_frame();
+        return peer.link_frame();
+    };
+    // The link frames that report status, one each from at on, idle_frame_cycles apart.
+    const auto reports = [&](uint8_t status, unsigned count, uint64_t at) {
+        bool all = true;
+        for (unsigned i = 0; i < count; ++i)
+            all = bare(peer.link_frame(), status) && peer.strobes.front() == at + i * idle && all;
+        return all;
+    };
+    // The rest of an opening's three reports, then the tray closed on nothing. Returns when the
+    // next link frame is due.
+    const auto close_after = [&](unsigned left) {
+        for (unsigned i = 0; i < left; ++i)
+            CHECK(bare(peer.link_frame(), 0x80));
+        const uint64_t due = peer.strobes.front() + idle;
+        CHECK(cdblock_drive_disc_tray(b, 0) == 0 && cdblock_drive_disc_state(b) == 0);
+        return due;
+    };
+
+    // The disc taken out of the open tray and the tray closed: 12, 12, 02 three times, then 83.
+    CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_present(b, 0) == 0);
+    uint64_t due = close_after(3);
+    CHECK(reports(0x12, 2, due) && reports(0x02, 3, due + 2 * idle) && reports(0x83, 2, due + 5 * idle));
+
+    // Command 0c opens the tray of a drive without a disc, and during the 02.
+    CHECK(bare(command(0x0c), 0x80));
+    due = close_after(2);
+    CHECK(reports(0x12, 2, due) && reports(0x02, 1, due + 2 * idle));
+    CHECK(bare(command(0x0c), 0x80) && cdblock_drive_disc_state(b) == CDBLOCK_DISC_TRAY_OPEN);
+    // The caller's opening during the 02, then a close: the search starts over from its 12.
+    due = close_after(2);
+    CHECK(reports(0x12, 2, due) && reports(0x02, 2, due + 2 * idle));
+    CHECK(cdblock_drive_disc_tray(b, 1) == 0);
+    due = close_after(3);
+    CHECK(reports(0x12, 2, due) && reports(0x02, 3, due + 2 * idle) && reports(0x83, 1, due + 5 * idle));
+
+    // The board's reset during the 12, and during the 02, reports no disc at once, its first link
+    // frame idle_frame_cycles away.
+    CHECK(bare(command(0x0c), 0x80));
+    due = close_after(2);
+    CHECK(reports(0x12, 1, due));
+    CHECK(cdblock_reset(b) == 0 && cdblock_clock_next(b) == idle);
+    sci0(b);
+    CHECK(bare(peer.link_frame(), 0x83));
+    CHECK(bare(command(0x0c), 0x80));
+    due = close_after(2);
+    CHECK(reports(0x12, 2, due) && reports(0x02, 2, due + 2 * idle));
+    CHECK(cdblock_reset(b) == 0 && cdblock_clock_next(b) == idle);
+    sci0(b);
+    CHECK(bare(peer.link_frame(), 0x83));
+
+    // A search of no time: 12, 12, then 83.
+    config.search_cycles = 0;
+    Peer instant(b, &config);
+    CHECK(cdblock_drive_disc_tray(b, 1) == 0 && cdblock_drive_disc_present(b, 0) == 0);
+    for (int i = 0; i < 3; ++i)
+        CHECK(bare(instant.link_frame(), 0x80));
+    due = instant.strobes.front() + idle;
+    CHECK(cdblock_drive_disc_tray(b, 0) == 0);
+    for (unsigned i = 0; i < 3; ++i)
+        CHECK(bare(instant.link_frame(), i < 2 ? 0x12 : 0x83) && instant.strobes.front() == due + i * idle);
 }
 
 // An audio sink that records each frame address and speed it is given and the sector's bytes, and
@@ -2199,6 +2315,7 @@ const std::vector<Test> drive_tests = {
     {"disc drive speed", disc_drive_speed},
     {"disc drive reset and copy", disc_drive_reset_and_clone},
     {"disc drive tray and disc change", disc_drive_tray},
+    {"disc drive search after a close on an empty tray", disc_drive_search},
     {"disc drive audio and its sink", disc_drive_audio},
     {"disc drive audio by the Q and through the tray", disc_drive_audio_by_q},
     {"disc drive over a long advance", disc_drive_long_advance},
