@@ -121,6 +121,25 @@ constexpr uint8_t CD = 0xc0, ID = 0x30, RW = 0x0c, SZ = 0x03;
 // BSC (section 8).
 constexpr unsigned BCR = 0x1a0, WCR1 = 0x1a2, WCR2 = 0x1a4, WCR3 = 0x1a6, DCR = 0x1a8, PCR = 0x1aa, RCR = 0x1ac,
                    RTCSR = 0x1ae, RTCNT = 0x1b0, RTCOR = 0x1b2;
+// The bits a CPU bus cycle's states follow, in their register's upper byte but WW1, which is in
+// WCR1's lower byte.
+namespace bcr
+{
+constexpr uint8_t DRAME = 0x80;
+}
+namespace wcr1
+{
+constexpr uint8_t RW1 = 0x02, WW1 = 0x02;
+}
+namespace wcr3
+{
+// A02LW and A6LW, two bits each: the long wait of areas 0 and 2 and of area 6, less one state.
+constexpr unsigned A02LW_SHIFT = 5, A6LW_SHIFT = 3;
+}
+namespace dcr
+{
+constexpr uint8_t RASD = 0x40, TPC = 0x20, BE = 0x10, MXC = 0x03;
+}
 
 // WDT (section 12): TCSR and TCNT read at their own addresses and written at TCSR, RSTCSR read at
 // its address and written at the one before it.

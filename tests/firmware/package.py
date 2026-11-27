@@ -14,6 +14,8 @@ known revision: strict, the clock skipping on at the profile's idle loop.
   of none, refused inputs, a library that is not there and a scenario that mixes the host's
   helpers with a run to an address.
 - A wait that never ends fails on the clock's cycles, as skipped time costs no instructions.
+- Host command 00 on CDB105, sent while the SH-1 idles: up to CMOK the clock passes 1.5 to 1.7
+  cycles an instruction.
 - The drive's sector provider in Python on CDB105: what it leaves or replaces reaches the host, and
   its exceptions come back from the run on the board that ran it, its copy's too.
 - The drive's subcode on CDB105: an audio play with 04's R-W setting on, where 20 returns each pack
@@ -63,7 +65,7 @@ from cdblock import binding, strict
 from cdblock import extension as extensions
 from cdblock.disc import (DATA, DATA_TRACK, FIRST, LAST, LEAD_OUT, NO_DISC, OPEN, PAUSE, PREGAP, SECTOR, SUBCODE,
                           Disc, Drive, q_symbols, sector)
-from cdblock.host import DCHG, DRDY, ESEL, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
+from cdblock.host import CMOK, DCHG, DRDY, ESEL, HIRQ, MPCM, PEND, REJECT, WAIT, WAIT_CYCLES, Host, RunError
 
 from . import rw
 from .common import PROFILES, ROMS, EmulatorError, Suite, board
@@ -84,6 +86,9 @@ HARNESS_FLAGS = binding.DEVICE_TIMING | binding.CLOCK
 # The clock runs ITU4, which the firmware starts at φ/8 with its overflow interrupt, one every
 # 524,288 cycles. Its handler takes 15 instructions.
 OVI4, OVERFLOW_INSTRUCTIONS = 98, 15
+# Host command 00 to its CMOK: the instructions it is given, and the range the cycles of each fall
+# in on average.
+COMMAND_INSTRUCTIONS, COMMAND_RATE = 10_000, (1.5, 1.7)
 # The sector provider's disc has no header, so E0, reading into CHECK_PARTITION, refuses it with
 # result 2 and reads stay open. Each read takes the sector at PROVIDED_FRAME into partition 0.
 CHECK_PARTITION, PROVIDED_FRAME_ADDRESS = 5, 1000
@@ -292,6 +297,35 @@ def check_wait_limit(suite, dumps):
         case.check(f"{WAIT_CYCLES:,} cycles passed" in str(error), f"failed otherwise: {error}")
         case.check(bd.instructions - start < host.budget, "within the instruction budget")
     case.info["cycles"] = bd.cycles
+    bd.close()
+
+
+def check_command_cycles(suite, dumps):
+    """Host command 00 on CDB105, sent while the SH-1 idles: the clock's cycles for each instruction
+    up to CMOK."""
+    case = suite.case("cdb105 cycles of a command")
+    profile = PROFILES["cdb105"]
+    bd = board(dumps.rom("cdb105"), flags=HARNESS_FLAGS)
+    strict.apply(bd, profile, None)
+    host = Host(bd, idle=profile.IDLE)
+    try:
+        host.boot()
+        host.idle_until(lambda: True, "the idle loop")
+        instructions, cycles = bd.instructions, bd.cycles
+        bd.host_clear_flags(0xFFFF & ~CMOK)
+        bd.host_command([0, 0, 0, 0])
+        bd.add_write_stop(HIRQ, HIRQ + 2)
+        while not bd.host_flags() & CMOK:
+            reason, pc = bd.run(COMMAND_INSTRUCTIONS)
+            if reason != binding.EXIT_WRITE:
+                raise RunError(f"exit {reason} at 0x{pc:08x}: {bd.error()}")
+        instructions, cycles = bd.instructions - instructions, bd.cycles - cycles
+        low, high = COMMAND_RATE
+        case.check(low * instructions <= cycles <= high * instructions,
+                   f"{cycles} cycles in {instructions} instructions, {cycles / instructions:.3f} each")
+        case.info["instructions"], case.info["cycles"] = instructions, cycles
+    except (RunError, EmulatorError) as error:
+        case.check(False, f"failed: {error}")
     bd.close()
 
 
@@ -1244,6 +1278,7 @@ def run(context):
         suite.skip("command line: needs cdb105.bin and mpeg-card/vcd.bin")
     if has("cdb105"):
         check_wait_limit(suite, dumps)
+        check_command_cycles(suite, dumps)
         check_sector_provider(suite, dumps)
         check_subcode(suite, dumps)
         check_subcode_provider(suite, dumps)
@@ -1254,10 +1289,10 @@ def run(context):
         check_index(suite, dumps)
         check_state(suite, dumps)
     else:
-        suite.skip("cdb105 a wait that never ends, the providers, the subcode, the tray, the pregap, the "
-                   "audio, the index and the state: need cdb105.bin")
+        suite.skip("cdb105 a wait that never ends, a command's cycles, the providers, the subcode, the tray, the "
+                   "pregap, the audio, the index and the state: need cdb105.bin")
     if dumps.complete and context.binutils:
-        suite.pin("cases", len(suite.cases), 66)
+        suite.pin("cases", len(suite.cases), 67)
     # Each profile's code: CDB105's blocks, 0x12 bytes more in CDB106's layout, the strap code's 22
     # for the 4 it replaces. The whole ROM, the code without a profile, fails it.
     for name in ROMS:
@@ -1270,9 +1305,9 @@ def run(context):
         if name not in dumps.roms:
             continue
         late = 7 if name in ("cdb106", "ygr022") else 0
-        for route, results, before, count, ready in (("vcdRoute", routes, 11_048_274, 14, has("vcd")),
-                                                      ("lifecycleRoute", lifecycle, 9_961_995, 12, context.binutils),
-                                                      ("moduleRoute", module, 10_037_235, 12, context.binutils)):
+        for route, results, before, count, ready in (("vcdRoute", routes, 11_048_274, 21, has("vcd")),
+                                                      ("lifecycleRoute", lifecycle, 9_961_995, 19, context.binutils),
+                                                      ("moduleRoute", module, 10_037_235, 19, context.binutils)):
             if not ready:
                 continue
             instructions, taken = results.get(name, (None, None))

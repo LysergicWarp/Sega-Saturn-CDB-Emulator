@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "../cpu/pipeline.h"
 #include "../cpu/sh1.h"
 #include "../drive/drive.h"
 #include "../sh7034/sh7034.h"
@@ -28,12 +29,11 @@ std::string hex(uint32_t value);
 
 struct BoardOptions
 {
-    bool test_low = false;      // TEST (TP3) grounded when the board is made: the diagnostic and monitor path
-    bool pc0_high = false;      // PC0 tied high, the 20-pin drive strap of some boards
-    bool probe_mirror = false;  // 0x09080000 repeats the buffer's first bytes instead of two bytes of its own
-    bool device_timing = false; // the card and the transfer FIFO act on their own, by instruction count
-    bool clock = false;         // the ITU counts the system clock, cycles_per_instruction for each instruction
-    uint32_t cycles_per_instruction = 1;
+    bool test_low = false;         // TEST (TP3) grounded when the board is made: the diagnostic and monitor path
+    bool pc0_high = false;         // PC0 tied high, the 20-pin drive strap of some boards
+    bool probe_mirror = false;     // 0x09080000 repeats the buffer's first bytes instead of two bytes of its own
+    bool device_timing = false;    // the card and the transfer FIFO act on their own, by instruction count
+    bool clock = false;            // the system clock runs: each instruction takes its cycles, and the ITU counts them
     std::vector<uint8_t> card_rom; // empty for no MPEG card
 };
 
@@ -70,8 +70,9 @@ class Board final : public Sh1Port, public DrivePort
     // stop or a SLEEP with nothing to accept. An illegal instruction's boundary counts though the
     // instruction does not execute, and so does one where an address error or a break on the fetch
     // is taken. Stops fire in delay slots too, and are not checked at the first boundary when
-    // skip_first_stop is set.
-    Exit run(uint64_t budget, bool skip_first_stop);
+    // skip_first_stop is set. With in_cycles the budget is in cycles of the clock instead, and the
+    // run ends at the first boundary where that many have passed. That needs the clock.
+    Exit run(uint64_t budget, bool skip_first_stop, bool in_cycles = false);
     uint64_t instructions() const
     {
         return executed;
@@ -301,6 +302,7 @@ class Board final : public Sh1Port, public DrivePort
     uint16_t fetch(uint32_t address) override;
     bool boundary(uint32_t pc) override;
     void executing(uint32_t pc, uint16_t opcode, bool slot) override;
+    void completed(bool branched) override;
     unsigned interrupt_request(unsigned &vector) override
     {
         return sh7034_.interrupt_request(vector);
@@ -370,6 +372,12 @@ class Board final : public Sh1Port, public DrivePort
     uint32_t rom_sum = 0;
     uint8_t probe[2] = {};
     Sh1 cpu;
+    // With the clock, what an instruction's cycles depend on beyond the instruction itself.
+    Pipeline pipeline_;
+    // With the clock, an instruction is executing and its time passes: its fetch as it starts,
+    // each of its data accesses before the access acts, and the rest once it has executed.
+    // in_slot says it runs in a delay slot.
+    bool timing = false, in_slot = false;
     Sh7034 sh7034_;
     Interface iface;
     Card card_;
@@ -406,6 +414,8 @@ class Board final : public Sh1Port, public DrivePort
     void address_fault(Master master, const std::string &text);
     uint32_t load_decoded(uint32_t address, unsigned size, Master master);
     void store_decoded(uint32_t address, unsigned size, uint32_t value, Master master);
+    // The executing instruction's data access passes its states on the clock.
+    void pass_access(uint32_t address, unsigned size, bool write);
     // The two bytes past the buffer, or the buffer's first two with the probe mirror.
     uint8_t *probe_at(uint32_t offset)
     {

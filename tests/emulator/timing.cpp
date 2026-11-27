@@ -6,7 +6,7 @@ namespace
 {
 
 const uint8_t card_rom[16] = {};
-const cdblock_options timed{CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom, 0};
+const cdblock_options timed{CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom};
 
 void card_requests()
 {

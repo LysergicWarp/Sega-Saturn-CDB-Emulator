@@ -4,7 +4,7 @@
 namespace
 {
 
-const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0};
 constexpr uint32_t smr1 = 0x05fffec8, brr1 = 0x05fffec9, scr1 = 0x05fffeca, tdr1 = 0x05fffecb, ssr1 = 0x05fffecc,
                    rdr1 = 0x05fffecd, pbcr1_low = 0x05ffffcd;
 // 8N1 at BRR1 0x41: 32 × 66 cycles a bit, ten bits a serial frame.
@@ -347,7 +347,7 @@ void receive_interrupt()
     CHECK(b.run() == CDBLOCK_EXIT_STOP && b.cpu().pc == loop);
     const uint8_t byte = 0x3a;
     cdblock_serial_send(b, &byte, 1);
-    // The loop runs until the byte's stop bit is sampled, a cycle an instruction.
+    // The loop runs until the byte's stop bit is sampled.
     cdblock_remove_stop(b, loop);
     CHECK(b.resume() == CDBLOCK_EXIT_STOP && b.cpu().pc == handler);
     const auto entered = b.log(CDBLOCK_LOG_INTERRUPT);
@@ -375,6 +375,7 @@ void transmit_and_error_interrupts()
         cdblock_add_stop(b, loop);
         cdblock_add_stop(b, handler);
         CHECK(b.run() == CDBLOCK_EXIT_STOP && b.cpu().pc == loop);
+        const uint64_t before = cdblock_clock_cycles(b);
         if (expected == 106)
         {
             // TIE with TDRE at 1.
@@ -400,8 +401,10 @@ void transmit_and_error_interrupts()
         CHECK(b.resume() == CDBLOCK_EXIT_STOP && b.cpu().pc == handler);
         const auto entered = b.log(CDBLOCK_LOG_INTERRUPT);
         CHECK(entered.size() == 1 && entered[0].value == expected);
+        // The handler is entered without a cycle passing, so the clock still shows when.
+        const uint64_t passed = cdblock_clock_cycles(b) - before;
         if (expected == 107)
-            CHECK(entered[0].instruction > 9 * bit && entered[0].instruction < serial_frame);
+            CHECK(passed >= 9 * bit && passed < serial_frame);
     }
 }
 
@@ -409,7 +412,7 @@ void test_pad()
 {
     Program p;
     p.loop();
-    const cdblock_options low{CDBLOCK_TEST_LOW, nullptr, 0, 0};
+    const cdblock_options low{CDBLOCK_TEST_LOW, nullptr, 0};
     Board b(p, &low);
     // PB10 reads the pad, bit 2 of PBDR, while it is a general input.
     CHECK(!(b.read(0x05ffffc2, 1) & 4));

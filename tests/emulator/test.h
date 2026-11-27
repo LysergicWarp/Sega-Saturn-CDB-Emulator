@@ -105,6 +105,14 @@ inline bool contains(const std::string &text, const char *part)
     return text.find(part) != std::string::npos;
 }
 
+// The number of the instruction the clock's cycle falls in, on a board that has run Program::loop
+// alone from reset: the loop's BRA takes two cycles and its NOP one.
+inline uint64_t loop_instruction(uint64_t cycle)
+{
+    const uint64_t pass = (cycle - 1) / 3;
+    return 2 * pass + ((cycle - 1) % 3 == 2 ? 2 : 1);
+}
+
 // A host command for the tests that only need the interface's command flag raised.
 inline constexpr uint16_t command[4] = {0x0100, 0, 0, 0};
 
@@ -135,4 +143,4 @@ struct Test
 };
 
 extern const std::vector<Test> cpu_tests, interrupt_tests, exception_tests, sh7034_tests, serial_tests, board_tests,
-    timing_tests, drive_tests, api_tests, state_tests;
+    timing_tests, cycle_tests, drive_tests, api_tests, state_tests;

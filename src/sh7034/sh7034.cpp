@@ -48,6 +48,8 @@ void Sh7034::reset()
     // A check that failed inside a transfer leaves the guard set.
     servicing = access_logged = false;
     clock = 0;
+    row_open = false;
+    row_address = 0;
     itu_mode_logged = 0;
     stale_shifts = all_channels;
     timers_seen = timers_due = 0;
@@ -138,6 +140,8 @@ void Sh7034::exchange(StateIo &io)
         io.flag(irq_latched[n]);
     }
     io.u64(clock);
+    io.flag(row_open);
+    io.u32(row_address);
     io.u8(itu_mode_logged);
     if (io.loading())
     {
@@ -149,6 +153,22 @@ void Sh7034::exchange(StateIo &io)
         timers_seen = clock;
         timers_due = 0;
     }
+}
+
+unsigned Sh7034::area1_states(uint32_t address, bool write)
+{
+    // RW1 for reads and WW1 for writes: long pitch, or two states in ordinary memory (section 8.2.2).
+    const bool slow = write ? regs[WCR1 + 1] & wcr1::WW1 : regs[WCR1] & wcr1::RW1;
+    const unsigned column = slow ? 2 : 1;
+    if (!(regs[BCR] & bcr::DRAME))
+        return column;
+    // Rows are compared from A8, A9 or A10 up, as MXC sets (section 8.2.5).
+    const uint8_t control = regs[DCR];
+    const unsigned shift = 8 + std::min<unsigned>(control & dcr::MXC, 2);
+    const bool same = (control & dcr::BE) && row_open && !((row_address ^ address) >> shift);
+    row_open = true;
+    row_address = address;
+    return same ? column : (control & dcr::TPC ? 2u : 1u) + 1 + column;
 }
 
 int Sh7034::timer_at(unsigned offset, unsigned &field)

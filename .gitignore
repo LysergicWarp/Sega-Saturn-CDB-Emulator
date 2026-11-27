@@ -1,4 +1,5 @@
 build/
+.vs/
 __pycache__/
 dumps/*
 !dumps/README.md

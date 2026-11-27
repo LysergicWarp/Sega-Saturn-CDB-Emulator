@@ -108,6 +108,46 @@ inline Target decode(uint32_t address, unsigned size)
     return {Target::Unmapped, 0};
 }
 
+// Whether code there is fetched 32 bits at a time: the on-chip ROM and RAM.
+bool wide_fetch(const Target &t)
+{
+    return t.device == Target::Rom || t.device == Target::Ram;
+}
+
+// The states of a CPU access as the bus state controller's registers set them (Hardware Manual
+// Table 8.4 and section 8.5). The on-chip ROM and RAM take one state and are 32 bits wide. Every
+// other device is on a 16-bit bus, where a longword is two cycles, but the modules below
+// MODULE_16_BIT, a cycle a byte. Unconfirmed: the card's access times, and the two cycles of a
+// longword in the modules' 16-bit half and of a word in their 8-bit half.
+unsigned bus_states(Sh7034 &bsc, const Target &t, uint32_t address, unsigned size, bool write)
+{
+    const unsigned cycles = size == 4 ? 2 : 1;
+    if (t.device == Target::Buffer || t.device == Target::Probe)
+    {
+        unsigned states = 0;
+        for (unsigned i = 0; i < cycles; ++i)
+            states += bsc.area1_states((address & 0x0fffffff) + 2 * i, write);
+        return states;
+    }
+    bsc.left_area1();
+    switch (t.device)
+    {
+    case Target::Rom:
+    case Target::Ram:
+        return 1;
+    case Target::Modules:
+        return Sh7034::module_states * (t.offset < onchip::MODULE_16_BIT ? size : cycles);
+    case Target::Interface:
+    case Target::Card:
+        return cycles * bsc.long_wait_states(false);
+    case Target::CardRom:
+        return cycles * bsc.long_wait_states(true);
+    default:
+        // An unmapped access fails the board.
+        return 0;
+    }
+}
+
 // What a read from the card's absent bus gives: all ones, as a bus floating high would,
 // unconfirmed.
 uint32_t floating(unsigned size)
@@ -256,7 +296,6 @@ void Board::identify(StateIo &io)
     io.same(uint32_t(options.test_low) | uint32_t(options.pc0_high) << 1 | uint32_t(options.probe_mirror) << 2 |
                 uint32_t(options.device_timing) << 3 | uint32_t(options.clock) << 4,
             "other options");
-    io.same(options.cycles_per_instruction, "other options");
     drive_.drive->identify(io);
 }
 
@@ -266,6 +305,7 @@ void Board::exchange(StateIo &io)
     io.bytes(buffer.data(), buffer.size());
     io.bytes(probe, sizeof probe);
     cpu.exchange(io);
+    pipeline_.exchange(io);
     sh7034_.exchange(io);
     iface.exchange(io);
     // A board without a card has no card state: the memory and the words the caller gave it are
@@ -290,12 +330,15 @@ void Board::exchange(StateIo &io)
     if (!io.loading())
         return;
     error = reason;
-    // A write stop's hit that a failed run left is dropped, and the next device event is found
-    // again.
+    // A write stop's hit and an instruction's timing that a failed run left are dropped, and the
+    // next device event is found again.
     run_.reset();
+    timing = false;
     drive_due = drive_.drive->due();
     // The drive's next action lies ahead of the clock, on every board that has not failed.
     io.require(failed || !drive_due || drive_due > sh7034_.cycles(), "time of the drive's next action");
+    // The multiplier is free within a multiply's states of the clock.
+    io.require(pipeline_.fits(sh7034_.cycles()), "multiplier time");
     events_moved();
 }
 
@@ -326,6 +369,8 @@ void Board::reset()
     cpu_fault = taking_fault = in_fault_entry = false;
     executed = 0;
     next_card_tick = Card::period;
+    pipeline_.reset();
+    timing = false;
     run_.reset();
     // Memory keeps its contents. Only the CPU's registers and the modules reset.
     cpu.reset();
@@ -353,6 +398,8 @@ void Board::unmodeled_read(uint32_t address, const char *what)
 uint32_t Board::load(uint32_t address, unsigned size, Master master)
 {
     address = aligned(address, size, master, "read");
+    if (timing && master == Master::Cpu)
+        pass_access(address, size, false);
     if (master != Master::Caller && sh7034_.break_armed())
         sh7034_.break_on(address, master == Master::Dma, false, false, size);
     const uint32_t value = load_decoded(address, size, master);
@@ -364,6 +411,8 @@ uint32_t Board::load(uint32_t address, unsigned size, Master master)
 void Board::store(uint32_t address, unsigned size, uint32_t value, Master master)
 {
     address = aligned(address, size, master, "write");
+    if (timing && master == Master::Cpu)
+        pass_access(address, size, true);
     if (master != Master::Caller && sh7034_.break_armed())
         sh7034_.break_on(address, master == Master::Dma, false, true, size);
     if (master == Master::Cpu && logbook_.watched(address, size))
@@ -371,6 +420,12 @@ void Board::store(uint32_t address, unsigned size, uint32_t value, Master master
     store_decoded(address, size, value, master);
     if (master == Master::Cpu)
         run_.wrote(address, size);
+}
+
+void Board::pass_access(uint32_t address, unsigned size, bool write)
+{
+    pipeline_.access();
+    advance(bus_states(sh7034_, decode(address, size), address, size, write));
 }
 
 // A misaligned CPU access goes ahead at the address with its low bits cleared, and the address
@@ -593,19 +648,33 @@ bool Board::poke(uint32_t address, uint8_t value)
     }
 }
 
-Exit Board::run(uint64_t budget, bool skip_first_stop)
+Exit Board::run(uint64_t budget, bool skip_first_stop, bool in_cycles)
 {
     if (failed)
     {
         error = "the board failed and needs a reset";
         return Exit::Error;
     }
-    if (budget == 0)
+    if (in_cycles && !options.clock)
     {
-        error = "the instruction budget must be at least 1";
+        error = "a budget in cycles needs the clock";
         return Exit::Error;
     }
-    run_.start(budget, skip_first_stop);
+    if (budget == 0)
+    {
+        error = in_cycles ? "the cycle budget must be at least 1" : "the instruction budget must be at least 1";
+        return Exit::Error;
+    }
+    constexpr uint64_t unlimited = ~uint64_t(0);
+    if (in_cycles)
+    {
+        const uint64_t now = sh7034_.cycles();
+        run_.start(unlimited, budget > unlimited - now ? unlimited : now + budget, skip_first_stop);
+    }
+    else
+    {
+        run_.start(budget, unlimited, skip_first_stop);
+    }
     try
     {
         cpu.run();
@@ -622,7 +691,7 @@ Exit Board::run(uint64_t budget, bool skip_first_stop)
 
 bool Board::boundary(uint32_t pc)
 {
-    if (const auto exit = run_.boundary(pc, cpu.sleeping()))
+    if (const auto exit = run_.boundary(pc, cpu.sleeping(), sh7034_.cycles()))
     {
         exit_reason = *exit;
         return true;
@@ -644,15 +713,43 @@ void Board::executing(uint32_t pc, uint16_t opcode, bool slot)
         violation("instruction outside the declared code at " + hex(pc));
     ++executed;
     covered[pc_index(pc)] = 1;
-    // The instruction's cycles pass as it executes, so a timer flag they set is taken at the
-    // boundary after it.
-    if (options.clock)
-        advance(options.cycles_per_instruction);
     if (logbook_.tracing())
     {
         const auto &s = cpu.state;
-        logbook_.trace_instruction(executed, pc, opcode, s.sr, s.r[15], s.pr, slot);
+        logbook_.trace_instruction(executed, pc, opcode, s.sr, s.r[15], s.pr, sh7034_.cycles(), slot);
     }
+    // The instruction's cycles pass as it executes, so a timer flag they set is taken at the
+    // boundary after it. SLEEP executes once more as its wake-up's handler returns, where the chip
+    // goes on from the instruction after it: that pass takes no time.
+    constexpr uint16_t sleep = 0x001b;
+    if (!options.clock || (opcode == sleep && cpu.state.sleep == Sh1::Sleep::Woken))
+        return;
+    const Target t = decode(pc, 2);
+    const bool bus = pipeline_.bus_fetch(pc, wide_fetch(t));
+    pipeline_.begin(opcode, bus);
+    timing = true;
+    in_slot = slot;
+    if (bus)
+        advance(bus_states(sh7034_, t, pc, 2, false));
+}
+
+void Board::completed(bool branched)
+{
+    if (!timing)
+        return;
+    timing = false;
+    // A BT or BF that branches and TRAPA have fetched the two instructions after them.
+    if (pipeline_.overruns(branched))
+        for (uint32_t pc = current_pc + 2; pc != current_pc + 6; pc += 2)
+        {
+            const Target t = decode(pc, 2);
+            const bool bus = pipeline_.bus_fetch(pc, wide_fetch(t));
+            pipeline_.overrun(bus);
+            if (bus)
+                advance(bus_states(sh7034_, t, pc, 2, false));
+        }
+    if (const uint64_t rest = pipeline_.finish(sh7034_.cycles(), branched, in_slot))
+        advance(rest);
 }
 
 // The PC's coverage flag, by the region it was fetched from.
@@ -693,6 +790,7 @@ void Board::clear_coverage()
 void Board::interrupt_accepted(unsigned vector, unsigned level)
 {
     sh7034_.interrupt_accepted(vector);
+    pipeline_.flush();
     log(LogKind::Interrupt, cpu.state.pc, vector);
     logbook_.trace_interrupt(vector, level);
 }
@@ -702,6 +800,7 @@ void Board::exception_entered(unsigned vector)
     // An address error's entry ignores the address errors its own stacking raises.
     in_fault_entry = taking_fault;
     taking_fault = false;
+    pipeline_.flush();
     log(LogKind::Exception, 0, vector, in_fault_entry ? fault_text : std::string());
     logbook_.trace_exception(vector);
 }

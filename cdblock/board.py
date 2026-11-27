@@ -20,9 +20,9 @@ class EmulatorError(Exception):
 
 
 class Board:
-    def __init__(self, rom, card_rom=None, flags=0, lib=None, cycles_per_instruction=0):
+    def __init__(self, rom, card_rom=None, flags=0, lib=None):
         self.lib = lib or b.load()
-        options = b.Options(flags, None, 0, cycles_per_instruction)
+        options = b.Options(flags, None, 0)
         if card_rom is not None:
             self._card = (b.u8 * len(card_rom)).from_buffer_copy(card_rom)
             options.card_rom = ctypes.cast(self._card, ctypes.POINTER(b.u8))
@@ -65,9 +65,9 @@ class Board:
         return bytes(state)
 
     def load(self, state):
-        """Takes on a state that save gave, of a board with the same ROM, card ROM, flags, clock
-        setting and drive. A state the board refuses raises EmulatorError and leaves the board as
-        it was. The board keeps what a state does not hold."""
+        """Takes on a state that save gave, of a board with the same ROM, card ROM, flags and
+        drive. A state the board refuses raises EmulatorError and leaves the board as it was. The
+        board keeps what a state does not hold."""
         image = (b.u8 * len(state)).from_buffer_copy(state)
         self._ok(self.lib.cdblock_state_load(self.handle, image, len(state)))
 
@@ -118,6 +118,15 @@ class Board:
     def step(self):
         pc = b.u32()
         exit_reason = self.lib.cdblock_step(self.handle, ctypes.byref(pc))
+        if exit_reason == b.EXIT_ERROR:
+            self._raise_kept()
+        return exit_reason, pc.value
+
+    def run_cycles(self, cycles):
+        """Runs until that many cycles of the clock have passed, to the instruction boundary at
+        or past them, with CLOCK. Returns the exit reason and the PC, as run does."""
+        pc = b.u32()
+        exit_reason = self.lib.cdblock_run_cycles(self.handle, cycles, ctypes.byref(pc))
         if exit_reason == b.EXIT_ERROR:
             self._raise_kept()
         return exit_reason, pc.value

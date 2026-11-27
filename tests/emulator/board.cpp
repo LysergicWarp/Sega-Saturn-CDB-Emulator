@@ -87,7 +87,7 @@ void board_straps()
     p.loop();
     // PC0 reads low, or high with the 20-pin drive strap.
     Board plain(p);
-    const cdblock_options strap{CDBLOCK_PC0_HIGH, nullptr, 0, 0};
+    const cdblock_options strap{CDBLOCK_PC0_HIGH, nullptr, 0};
     Board strapped(p, &strap);
     CHECK(plain.read(0x05ffffd1, 1) == 0 && strapped.read(0x05ffffd1, 1) == 1);
     // The two bytes past the buffer hold their own word, or with the mirror are the buffer's first.
@@ -95,7 +95,7 @@ void board_straps()
     cdblock_poke(plain, 0x09000000, first, 2);
     plain.write(0x09080000, 2, 0xabcd);
     CHECK(plain.read(0x09080000, 2) == 0xabcd && plain.read(0x09000000, 2) == 0x1234);
-    const cdblock_options mirror{CDBLOCK_PROBE_MIRROR, nullptr, 0, 0};
+    const cdblock_options mirror{CDBLOCK_PROBE_MIRROR, nullptr, 0};
     Board mirrored(p, &mirror);
     cdblock_poke(mirrored, 0x09000000, first, 2);
     CHECK(mirrored.read(0x09080000, 2) == 0x1234);
@@ -133,7 +133,7 @@ void card_memory()
     Program p;
     p.loop();
     const uint8_t rom[2] = {0x5a, 0xa5};
-    cdblock_options options{0, rom, sizeof rom, 0};
+    cdblock_options options{0, rom, sizeof rom};
     Board b(p, &options);
     CHECK(b.read(0x0e000000, 2) == 0x5aa5 && b.read(0x0e080000, 2) == 0x5aa5); // repeats every 512 KB
     b.write(0x0a100030, 2, 0x0010);                                            // address in 8-byte units
@@ -159,7 +159,7 @@ void card_data_requests()
     Program p;
     p.loop();
     const uint8_t rom[16] = {};
-    cdblock_options options{0, rom, sizeof rom, 0};
+    cdblock_options options{0, rom, sizeof rom};
     Board b(p, &options);
     const uint8_t words[4] = {0x11, 0x11, 0x22, 0x22};
     cdblock_poke(b, 0x09000000, words, 4);
@@ -187,7 +187,7 @@ void card_interrupts()
     Program p;
     p.loop();
     const uint8_t rom[16] = {};
-    cdblock_options options{0, rom, sizeof rom, 0};
+    cdblock_options options{0, rom, sizeof rom};
     Board b(p, &options);
     // MPEG V IRQ on TIOCB2 and MPEG A IRQ on TIOCA2, each captured as ITU2 is set to.
     b.write(0x05ffff19, 1, 0x55); // TIOR2: capture A and B on falling edges
@@ -207,7 +207,7 @@ void card_picture_and_indexed()
     Program p;
     p.loop();
     const uint8_t rom[16] = {};
-    cdblock_options options{0, rom, sizeof rom, 0};
+    cdblock_options options{0, rom, sizeof rom};
     Board b(p, &options);
     // The picture word and the indexed words read as the caller sets them, a write choosing the index.
     CHECK(cdblock_card_set_picture(b, 0x1234) == 0 && b.read(0x0a100006, 2) == 0x1234);

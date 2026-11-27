@@ -25,7 +25,7 @@ P = ctypes.POINTER
 
 
 class Options(ctypes.Structure):
-    _fields_ = [("flags", u32), ("card_rom", P(u8)), ("card_rom_size", size_t), ("cycles_per_instruction", u32)]
+    _fields_ = [("flags", u32), ("card_rom", P(u8)), ("card_rom_size", size_t)]
 
 
 class Cpu(ctypes.Structure):
@@ -80,6 +80,7 @@ FUNCTIONS = [
     ("cdblock_run", c_int, [Board, u64, P(u32)]),
     ("cdblock_run_from_stop", c_int, [Board, u64, P(u32)]),
     ("cdblock_step", c_int, [Board, P(u32)]),
+    ("cdblock_run_cycles", c_int, [Board, u64, P(u32)]),
     ("cdblock_add_stop", c_int, [Board, u32]),
     ("cdblock_remove_stop", c_int, [Board, u32]),
     ("cdblock_clear_stops", None, [Board]),

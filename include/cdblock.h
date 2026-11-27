@@ -3,10 +3,11 @@
  *
  * The board runs any CD-block ROM dump. Devices act only when the caller raises their events, unless
  * device timing or the clock is on, and the CPU runs until a stop address, a write stop,
- * an instruction budget or a SLEEP with nothing to accept. Functions returning int give 0, a
- * count or, for cdblock_drive_disc_state, bits on success and -1 on failure, with the reason in
- * cdblock_last_error. cdblock_run, cdblock_run_from_stop and cdblock_step give an exit reason
- * instead: on failure CDBLOCK_EXIT_ERROR, which is 0, with the reason in the same place.
+ * a budget of instructions or cycles or a SLEEP with nothing to accept. Functions returning int
+ * give 0, a count or, for cdblock_drive_disc_state, bits on success and -1 on failure, with the
+ * reason in cdblock_last_error. cdblock_run, cdblock_run_from_stop, cdblock_step and
+ * cdblock_run_cycles give an exit reason instead: on failure CDBLOCK_EXIT_ERROR, which is 0, with
+ * the reason in the same place.
  *
  * An error the board cannot go on from (a failed check, an unknown drive command, or a nonzero
  * return from a provider or the audio sink) fails the board, which then needs a reset. Until then
@@ -53,19 +54,24 @@ typedef struct cdblock_board cdblock_board;
 #define CDBLOCK_CARD_PERIOD 64
 #define CDBLOCK_FIFO_WORDS 6
 
-/* The clock counts cycles of the system clock: cycles_per_instruction for each instruction
- * executed, and what cdblock_clock_advance adds. The ITU counts on it. README.md, The clock, has
- * the behaviour. */
+/* The clock counts cycles of the system clock: those each instruction takes, and what
+ * cdblock_clock_advance adds. The ITU counts on it.
+ * - An instruction takes its execution states, with the states of its fetch and of its data
+ *   accesses as the bus state controller's registers set them for the memory each goes to.
+ * - Not counted: DRAM refresh, the bus cycles of DMA transfers and the entry of an exception or
+ *   an interrupt.
+ * - Unconfirmed: the states the multiplier takes, measured on a console only for MULS.W back to
+ *   back, and the access time of the MPEG card's registers and ROM.
+ * README.md, The clock, has the behaviour. */
 
 typedef struct cdblock_options
 {
     uint32_t flags; /* CDBLOCK_TEST_LOW, CDBLOCK_PC0_HIGH, CDBLOCK_PROBE_MIRROR, CDBLOCK_DEVICE_TIMING, CDBLOCK_CLOCK */
-    const uint8_t *card_rom;         /* the MPEG card's ROM, NULL for no card */
-    size_t card_rom_size;            /* at most 512 KB, padded with zeros */
-    uint32_t cycles_per_instruction; /* with CDBLOCK_CLOCK, 0 for 1 */
+    const uint8_t *card_rom; /* the MPEG card's ROM, NULL for no card */
+    size_t card_rom_size;    /* at most 512 KB, padded with zeros */
 } cdblock_options;
 
-/* Exit reasons of cdblock_run, cdblock_run_from_stop and cdblock_step. */
+/* Exit reasons of cdblock_run, cdblock_run_from_stop, cdblock_step and cdblock_run_cycles. */
 #define CDBLOCK_EXIT_ERROR 0
 #define CDBLOCK_EXIT_STOP 1
 #define CDBLOCK_EXIT_BUDGET 2
@@ -179,10 +185,16 @@ CDBLOCK_EXPORT int cdblock_state_load(cdblock_board *board, const uint8_t *in, s
  * budget counts instruction boundaries. One where undefined code is refused, or an address error
  * or a break on the fetch is taken, counts though no instruction executes there, and
  * cdblock_instructions leaves it out. A budget of 0 is refused with CDBLOCK_EXIT_ERROR, and leaves
- * the board as it was. pc, unless NULL, gets the PC where the run ended. */
+ * the board as it was. pc, unless NULL, gets the PC where the run ended.
+ *
+ * cdblock_run_cycles runs as cdblock_run does with its budget in cycles of the clock, for a host
+ * that gives the board its share of time. It ends with CDBLOCK_EXIT_BUDGET at the first
+ * instruction boundary where that many cycles have passed, so past the budget by what is left of
+ * the last instruction. It needs CDBLOCK_CLOCK, and refuses a budget of 0. */
 CDBLOCK_EXPORT int cdblock_run(cdblock_board *board, uint64_t budget, uint32_t *pc);
 CDBLOCK_EXPORT int cdblock_run_from_stop(cdblock_board *board, uint64_t budget, uint32_t *pc);
 CDBLOCK_EXPORT int cdblock_step(cdblock_board *board, uint32_t *pc);
+CDBLOCK_EXPORT int cdblock_run_cycles(cdblock_board *board, uint64_t cycles, uint32_t *pc);
 CDBLOCK_EXPORT int cdblock_add_stop(cdblock_board *board, uint32_t pc);
 CDBLOCK_EXPORT int cdblock_remove_stop(cdblock_board *board, uint32_t pc);
 CDBLOCK_EXPORT void cdblock_clear_stops(cdblock_board *board);
@@ -579,8 +591,9 @@ CDBLOCK_EXPORT void cdblock_clear_coverage(cdblock_board *board);
  * others are dropped, and the trace still writes them.
  *
  * The trace is text: a header row, then a tab-separated row for each instruction as it starts, its
- * number since reset in decimal, then in hex its PC, opcode, SR, R15 and PR, and "slot" in a delay
- * slot. Rows starting with # are events, their fields separated by spaces: "# log" with the kind,
+ * number since reset in decimal, then in hex its PC, opcode, SR, R15 and PR, then the clock's cycle
+ * as it starts in decimal, 0 without the clock, and "slot" in a delay slot. Rows starting with #
+ * are events, their fields separated by spaces: "# log" with the kind,
  * address and value (hex) and text of each log entry but interrupts and exceptions, which have
  * "# interrupt vector V level L" and "# exception vector V", and "# error" with the error that
  * failed the board, in a run or another call. */

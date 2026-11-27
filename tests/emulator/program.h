@@ -143,6 +143,14 @@ struct Program
         nop();
         return address;
     }
+    // NOPs up to the ROM's end, where a branch to itself stops them: more instructions than a test
+    // runs, each taking one cycle of the clock.
+    void sled()
+    {
+        while (at < rom.size() - 4)
+            nop();
+        loop();
+    }
     // Writes value to the register at address as a word, through r1 and r0.
     void poke_w(uint32_t address, uint32_t value)
     {
