@@ -6,7 +6,7 @@ int failures = 0, assertions = 0;
 int main()
 {
     for (const auto *tests : {&cpu_tests, &interrupt_tests, &exception_tests, &sh7034_tests, &serial_tests,
-                              &board_tests, &timing_tests, &drive_tests, &api_tests, &state_tests})
+                              &board_tests, &timing_tests, &cycle_tests, &drive_tests, &api_tests, &state_tests})
     {
         for (const auto &t : *tests)
         {

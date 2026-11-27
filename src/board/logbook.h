@@ -87,7 +87,7 @@ class Logbook
         return trace != nullptr;
     }
     void trace_instruction(uint64_t instruction, uint32_t pc, uint16_t opcode, uint32_t sr, uint32_t r15, uint32_t pr,
-                           bool slot);
+                           uint64_t cycle, bool slot);
     void trace_interrupt(unsigned vector, unsigned level);
     void trace_exception(unsigned vector);
     void trace_error(const char *text);

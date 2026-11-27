@@ -9,7 +9,7 @@
 namespace
 {
 
-const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0};
 constexpr uint64_t double_speed = 133'333, single_speed = 266'667, strobe = 4'000, idle = 332'520;
 
 uint8_t bcd(uint32_t value)
@@ -1318,7 +1318,7 @@ void disc_drive_subcode_interrupts()
         b.write(0x0a000006, 2, 0xff8f);
         arm_channel0(b);
         const size_t sectors = b.log(CDBLOCK_LOG_DRIVE_SECTOR).size();
-        CHECK(b.run(2 * single_speed) == CDBLOCK_EXIT_BUDGET);
+        CHECK(cdblock_run_cycles(b, 2 * single_speed, nullptr) == CDBLOCK_EXIT_BUDGET);
         size_t taken = 0;
         for (const auto &entry : b.log(CDBLOCK_LOG_INTERRUPT))
             taken += entry.value == 71;
@@ -2240,14 +2240,16 @@ void disc_drive_index()
 
 void disc_drive_while_running()
 {
-    // The drive acts as the CPU runs, an instruction a cycle. Nothing answers its strobes here.
+    // The drive acts as the CPU runs, in the instruction its cycle falls in. Nothing answers its
+    // strobes here.
     Program p;
     p.loop();
     Board b(p, &clocked);
     CHECK(cdblock_drive_select(b, CDBLOCK_DRIVE_DISC) == 0);
-    CHECK(b.run(2 * double_speed + 13 * strobe + 1) == CDBLOCK_EXIT_BUDGET);
+    CHECK(cdblock_run_cycles(b, 2 * double_speed + 13 * strobe + 1, nullptr) == CDBLOCK_EXIT_BUDGET);
     const auto reports = b.log(CDBLOCK_LOG_DRIVE_REPORT);
-    CHECK(reports.size() == 2 && reports[0].instruction == double_speed && reports[1].instruction == 2 * double_speed);
+    CHECK(reports.size() == 2 && reports[0].instruction == loop_instruction(double_speed) &&
+          reports[1].instruction == loop_instruction(2 * double_speed));
     CHECK(b.log(CDBLOCK_LOG_LINK_MISSED).size() == size_t(2) * 13);
 }
 
@@ -2258,11 +2260,11 @@ void disc_drive_chosen_later()
     Program p;
     p.loop();
     Board b(p, &clocked);
-    CHECK(b.run(1000) == CDBLOCK_EXIT_BUDGET);
+    CHECK(b.run(1000) == CDBLOCK_EXIT_BUDGET && cdblock_clock_cycles(b) == 1500);
     CHECK(cdblock_drive_select(b, CDBLOCK_DRIVE_DISC) == 0);
-    CHECK(b.run(double_speed + 1) == CDBLOCK_EXIT_BUDGET);
+    CHECK(cdblock_run_cycles(b, double_speed + 1, nullptr) == CDBLOCK_EXIT_BUDGET);
     const auto reports = b.log(CDBLOCK_LOG_DRIVE_REPORT);
-    CHECK(reports.size() == 1 && reports[0].instruction == 1000 + double_speed);
+    CHECK(reports.size() == 1 && reports[0].instruction == loop_instruction(1500 + double_speed));
 }
 
 void timer_dma_starts_transfer()

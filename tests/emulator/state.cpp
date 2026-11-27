@@ -312,8 +312,8 @@ void format()
 }
 
 const uint8_t card_rom[4] = {0x12, 0x34, 0x56, 0x78};
-const cdblock_options machine_options{CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom, 3};
-const cdblock_options cardless_options{CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, nullptr, 0, 3};
+const cdblock_options machine_options{CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom};
+const cdblock_options cardless_options{CDBLOCK_CLOCK | CDBLOCK_DEVICE_TIMING, nullptr, 0};
 
 // A counter in r0, stored and then a SLEEP each pass, with SR.I at 0. ITU0's compare match A has a
 // handler that clears the flag and counts at 0x0f000200, IRQ6 and IRQ7 each one that clears the
@@ -712,7 +712,7 @@ void fed()
 // The disc drive on the clock. The SH-1's side of the link is done by hand at each event, from
 // the board's RAM alone: the packet for the link frame that runs, the one staged for the next, and
 // the script's last step.
-const cdblock_options disc_options{CDBLOCK_CLOCK, nullptr, 0, 0};
+const cdblock_options disc_options{CDBLOCK_CLOCK, nullptr, 0};
 constexpr uint32_t packet_at = 0x0f000800, staged_at = 0x0f000810, step_at = 0x0f000820;
 constexpr uint64_t sector_period = 133'333;
 
@@ -1136,7 +1136,7 @@ void failed_inside()
     }
     {
         // The FIFO's request of channel 1, with device timing, likewise.
-        const cdblock_options timed{CDBLOCK_DEVICE_TIMING, nullptr, 0, 0};
+        const cdblock_options timed{CDBLOCK_DEVICE_TIMING, nullptr, 0};
         Board b(p, &timed);
         const auto good = saved(b);
         const auto arm = [&](uint32_t source) {
@@ -1334,7 +1334,7 @@ void card_turns()
     // and how far the interrupt has got.
     Program p;
     p.loop();
-    const cdblock_options timed{CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom, 0};
+    const cdblock_options timed{CDBLOCK_DEVICE_TIMING, card_rom, sizeof card_rom};
     const auto sent = [](const Board &board) { return (board.peek(0x05ffff1b, 1) & 2) != 0; };
     Board b(p, &timed);
     b.write(0x05ffff19, 1, 0x50); // TIOR2: capture B on falling edges
@@ -1360,7 +1360,7 @@ void logged_once()
     // that loads the state logs none of them again.
     Program p;
     p.loop();
-    const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
+    const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0};
     const Make make = [&] {
         cdblock_board *made = cdblock_create(p.rom.data(), p.rom.size(), &clocked);
         if (made)
@@ -1411,7 +1411,7 @@ void refused()
     Program p;
     p.loop();
     const uint8_t other_rom[4] = {0x12, 0x34, 0x56, 0x79};
-    const cdblock_options options{CDBLOCK_CLOCK, card_rom, sizeof card_rom, 2};
+    const cdblock_options options{CDBLOCK_CLOCK, card_rom, sizeof card_rom};
     Board source(p, &options);
     CHECK(source.run(50) == CDBLOCK_EXIT_BUDGET);
     const auto state = saved(source);
@@ -1447,8 +1447,7 @@ void refused()
                               +[](cdblock_options &o) { o.flags |= CDBLOCK_TEST_LOW; },
                               +[](cdblock_options &o) { o.flags |= CDBLOCK_PC0_HIGH; },
                               +[](cdblock_options &o) { o.flags |= CDBLOCK_DEVICE_TIMING; },
-                              +[](cdblock_options &o) { o.flags &= ~CDBLOCK_CLOCK; },
-                              +[](cdblock_options &o) { o.cycles_per_instruction = 3; }})
+                              +[](cdblock_options &o) { o.flags &= ~CDBLOCK_CLOCK; }})
     {
         cdblock_options changed = options;
         change(changed);
@@ -1540,9 +1539,16 @@ void values()
         refuses(b, state, taken, 1, "count of sector bytes taken");
         refuses(b, state, write_at, 6, "FIFO position");
         refuses(b, state, read_at, 6, "FIFO position");
-        // The interface's fields before those take 66 bytes and the on-chip modules' 733. The CPU's
-        // last three are the SLEEP state, the hold after an LDC and the check that waits.
-        const size_t sleep = read_at - 66 - 733 - 3;
+        // The interface's fields before those take 66 bytes and the on-chip modules' 738. Before
+        // them the pipeline's 13: the fetched pair's address, which is the second half of a
+        // longword, the multiplier's cycle and the register just loaded, at most 17.
+        const size_t pipeline = read_at - 66 - 738 - 13;
+        refuses(b, state, pipeline, 1, "fetched pair");
+        refuses(b, state, pipeline + 12, 18, "loaded register");
+        // The multiplier is busy for at most three cycles past the clock.
+        refuses(b, state, pipeline + 5, 1, "multiplier time");
+        // The CPU's last three are the SLEEP state, the hold after an LDC and the check that waits.
+        const size_t sleep = pipeline - 3;
         refuses(b, state, sleep, 3, "SLEEP state");
         refuses(b, state, sleep + 1, 2, "flag");
         // Before those the delay slot's target, and 23 registers of 4 bytes back the PC, with SR

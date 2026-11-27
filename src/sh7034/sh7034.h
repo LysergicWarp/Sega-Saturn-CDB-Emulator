@@ -81,6 +81,31 @@ class Sh7034
         return clock;
     }
 
+    // BSC (section 8.2): the states of a CPU bus cycle, from the registers as last written. No wait
+    // state comes from WAIT: the board ties pin 56 high, and the firmware sets it to PA3. The DMAC's
+    // cycles take no states and leave the DRAM's row as it is.
+    // An on-chip module's register (Table 8.4).
+    static constexpr unsigned module_states = 3;
+    // Areas 0 and 2, or area 6: one state and WCR3's long wait of 1 to 4 (section 8.2.4).
+    unsigned long_wait_states(bool area6) const
+    {
+        const unsigned shift = area6 ? onchip::wcr3::A6LW_SHIFT : onchip::wcr3::A02LW_SHIFT;
+        return 2 + (regs[onchip::WCR3] >> shift & 3);
+    }
+    // Area 1, at address without its top four bits. As DRAM (BCR's DRAME) the column cycle takes
+    // one state, or two at long pitch, and a full access adds the precharge of one or two states
+    // and the row's one (sections 8.2.5 and 8.5). In burst operation an access in the row of the
+    // last one is a column cycle alone. As ordinary memory the cycle takes one or two states.
+    // Without burst operation and in RAS up mode the precharge is charged each time, unconfirmed.
+    unsigned area1_states(uint32_t address, bool write);
+    // A bus cycle outside area 1. In RAS up mode it closes the DRAM's row, in RAS down mode the
+    // row stays open (section 8.5.5).
+    void left_area1()
+    {
+        if (!(regs[onchip::DCR] & onchip::dcr::RASD))
+            row_open = false;
+    }
+
     // DMAC (section 9). One transfer unit on channel 0 or 1 at its DREQ input. In single address
     // mode from the device, word is the device's data. To the device, the unit's data is returned
     // in word. False when the channel is not enabled for an external request.
@@ -239,6 +264,9 @@ class Sh7034
     // reaches its bytes one by one.
     bool servicing = false, access_logged = false;
     uint64_t clock = 0;
+    // The DRAM's open row: the address of the last CPU access to it, while RAS has stayed low.
+    bool row_open = false;
+    uint32_t row_address = 0;
     // Channels whose counting mode is not modeled, logged once until their settings change.
     uint8_t itu_mode_logged = 0;
     // Each channel's prescaler shift while it counts, else not_counting, kept so the clock's count

@@ -20,7 +20,7 @@ bool Logbook::trace_open(const std::string &path)
     trace_close();
     trace = std::fopen(path.c_str(), "w");
     if (trace)
-        std::fprintf(trace, "instruction\tpc\topcode\tsr\tr15\tpr\n");
+        std::fprintf(trace, "instruction\tpc\topcode\tsr\tr15\tpr\tcycle\n");
     return trace != nullptr;
 }
 
@@ -32,12 +32,13 @@ void Logbook::trace_close()
 }
 
 void Logbook::trace_instruction(uint64_t instruction, uint32_t pc, uint16_t opcode, uint32_t sr, uint32_t r15,
-                                uint32_t pr, bool slot)
+                                uint32_t pr, uint64_t cycle, bool slot)
 {
     if (!trace)
         return;
-    std::fprintf(trace, "%" PRIu64 "\t%08" PRIx32 "\t%04x\t%08" PRIx32 "\t%08" PRIx32 "\t%08" PRIx32 "%s\n",
-                 instruction, pc, unsigned(opcode), sr, r15, pr, slot ? "\tslot" : "");
+    std::fprintf(trace,
+                 "%" PRIu64 "\t%08" PRIx32 "\t%04x\t%08" PRIx32 "\t%08" PRIx32 "\t%08" PRIx32 "\t%" PRIu64 "%s\n",
+                 instruction, pc, unsigned(opcode), sr, r15, pr, cycle, slot ? "\tslot" : "");
 }
 
 void Logbook::trace_interrupt(unsigned vector, unsigned level)

@@ -90,7 +90,7 @@ void failed_board()
     // An unmapped read fails the board: every event is refused until the reset, peeks still work.
     Program p;
     access_program(p, 0x0b000000, false, 4);
-    const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0, 0};
+    const cdblock_options clocked{CDBLOCK_CLOCK, nullptr, 0};
     Board b(p, &clocked);
     b.write(0x0a00001e, 2, 0x0001); // a host flag the refused clear must keep
     CHECK(b.run(100) == CDBLOCK_EXIT_ERROR && contains(b.error(), "unmapped"));
@@ -136,7 +136,7 @@ void clone()
     p.nop();
     p.pool();
     const uint8_t rom[2] = {0x5a, 0xa5};
-    cdblock_options options{0, rom, sizeof rom, 0};
+    cdblock_options options{0, rom, sizeof rom};
     Board a(p, &options);
     CHECK(a.run(20) == CDBLOCK_EXIT_BUDGET);
     // State the copy must keep: a channel's TE, card memory, a queued link frame and a stop.

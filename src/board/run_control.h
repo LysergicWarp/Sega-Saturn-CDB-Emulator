@@ -1,6 +1,6 @@
 #pragma once
 // What ends a run, and what the strict checks are given: stop addresses, write stops and the
-// instruction budget, and the declared code ranges and write areas.
+// budget in instructions or cycles, and the declared code ranges and write areas.
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -47,17 +47,20 @@ class RunControl
         write_hit = false;
     }
 
-    // A run of at most budget boundaries. One from a stop skips the stop at its first boundary.
-    void start(uint64_t budget, bool skip_first_stop)
+    // A run of at most budget boundaries, which ends at the first boundary where the clock has
+    // reached last_cycle. One from a stop skips the stop at its first boundary.
+    void start(uint64_t budget, uint64_t last_cycle, bool skip_first_stop)
     {
         run_budget = budget;
+        run_end = last_cycle;
         run_count = 0;
         first_boundary = true;
         skip_first = skip_first_stop;
     }
-    // At an instruction boundary: how the run ends there, after a write stop's write, at a stop,
-    // out of budget or in SLEEP, in that order. A boundary the run passes counts.
-    std::optional<Exit> boundary(uint32_t pc, bool sleeping)
+    // At an instruction boundary, with the clock at cycle: how the run ends there, after a write
+    // stop's write, at a stop, out of budget or in SLEEP, in that order. A boundary the run passes
+    // counts.
+    std::optional<Exit> boundary(uint32_t pc, bool sleeping, uint64_t cycle)
     {
         const bool check_stop = !(first_boundary && skip_first);
         first_boundary = false;
@@ -68,7 +71,7 @@ class RunControl
         }
         if (check_stop && stop_at(pc))
             return Exit::Stop;
-        if (run_count >= run_budget)
+        if (run_count >= run_budget || cycle >= run_end)
             return Exit::Budget;
         if (sleeping)
             return Exit::Sleep;
@@ -99,7 +102,7 @@ class RunControl
     std::vector<uint32_t> stops;
     std::vector<uint8_t> rom_stops, rom_code_ok;
     std::vector<std::pair<uint32_t, uint32_t>> code_ranges, write_areas, write_stops;
-    uint64_t run_count = 0, run_budget = 0;
+    uint64_t run_count = 0, run_budget = 0, run_end = 0;
     bool first_boundary = false, skip_first = false, write_hit = false;
 
     bool stop_at(uint32_t pc) const

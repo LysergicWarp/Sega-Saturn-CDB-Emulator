@@ -41,20 +41,20 @@ DEFAULTS = {"sector_cycles": 266_667, "strobe_cycles": 4_000, "seek_cycles": 1_3
 # - Sector period: the firmware locks on to pulses within 14 ITU4 counts (112 cycles) of 16,666 at
 #   double speed, 266,656 +- 224 at single speed. When the handler reads TCNT4 widens that a little,
 #   to the edges pinned here, -238 and +239. Outside no read locks: result 0.
-# - Strobe spacing: a byte takes 3200 cycles at BRR 99 and the SH-1 starts it 189 after the strobe.
+# - Strobe spacing: a byte takes 3200 cycles at BRR 99 and the SH-1 starts it 336 after the strobe.
 #   The top is the drive's own bound, 13 strobes within a sector at double speed.
 # - Seek latency: the check's 8 seeks (the header, four ring seeks, each pass) under E0's 20 s, each
 #   read landing early enough to be taken at its first try.
 MISSED = "error: drive check: the SH-1 missed a transfer of a link frame"
 BANDS = {"sector_cycles": ((266_418, 266_417, 0), (266_895, 266_896, 0)),
-         "strobe_cycles": ((3_389, 3_388, MISSED), (10_256, None, None)),
+         "strobe_cycles": ((3_536, 3_535, MISSED), (10_256, None, None)),
          "seek_cycles": ((0, None, None), (49_281_210, 49_281_211, 3))}
 # The zone: every corner gives each case its result. The strobe top is what the low sector period
 # allows. Near either sector edge the pulse lock can take more sectors than a landing gives, so reads
 # are still sent again, and the seek top falls under the timeout first at a corner: one cycle above
 # it, at the low sector period and the high strobe spacing, each read takes up to eight tries and
 # the control ends with result 3.
-ZONE = {"sector_cycles": (266_418, 266_895), "strobe_cycles": (3_390, 10_246), "seek_cycles": (0, 11_855_612)}
+ZONE = {"sector_cycles": (266_418, 266_895), "strobe_cycles": (3_537, 10_246), "seek_cycles": (0, 11_855_612)}
 
 
 def failing_seeks(record):

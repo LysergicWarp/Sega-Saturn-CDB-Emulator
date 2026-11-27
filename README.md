@@ -32,15 +32,17 @@ ROM dump the caller supplies.
   card extensions, and [firmware tests](#firmware-tests) of the four known firmware revisions and
   eight MPEG cards run on dumps you supply.
 
-It is not cycle accurate: there is no instruction or bus timing, and the disc drive's timing is a
-guess. MPEG decoding and disc images are not modeled
+It is not cycle accurate. With the clock an instruction takes the cycles of its kind and of the
+memory it uses, but DRAM refresh, DMA transfers and exception entry take none, and the disc
+drive's timing is a guess. MPEG decoding and disc images are not modeled
 ([what it does not model](#what-it-does-not-model)).
 
 By default the board has no clock. Devices act only when the caller raises their events, and the
-CPU runs until a stop address, a write stop, an instruction budget, or a SLEEP with no interrupt to
-accept. That makes every run reproducible and leaves the timing of outside events to the caller.
-Two board options act on their own: [device timing](#device-timing) lets the MPEG card and the
-transfer FIFO act, counted in instructions, and [the clock](#the-clock) lets the timers count.
+CPU runs until a stop address, a write stop, a budget of instructions or cycles, or a SLEEP with no
+interrupt to accept. That makes every run reproducible and leaves the timing of outside events to
+the caller. Two board options act on their own: [device timing](#device-timing) lets the MPEG card
+and the transfer FIFO act, counted in instructions, and [the clock](#the-clock) gives each
+instruction its cycles and lets the timers count them.
 
 ## Quick start
 
@@ -112,6 +114,7 @@ belongs to one board and reaches the others through it.
 | --- | --- | --- |
 | `Board`, `src/board/board.h` | ROM, RAM, buffer DRAM, the address decode, coverage and the parts below | |
 | `Sh1`, `src/cpu/` | CPU state, the instruction loop, exception and interrupt entry | `Sh1Port`: memory accesses and hooks at each instruction |
+| `Pipeline`, `src/cpu/pipeline.h` | Each instruction's execution states, and what its cycles depend on from the instructions before it | Called by the board |
 | `Sh7034`, `src/sh7034/` | The on-chip modules and the clock's cycle count | A board pointer, for the DMAC's bus cycles, the link and checks |
 | `Interface`, `Card`, `Link`, `SerialLine`, `src/board/` | The interface chip, the MPEG card, the running link frame, the far end of SCI1's line | A board pointer |
 | `Drive`, `src/drive/` | The drive, silent, fed by the caller or the disc drive | Turns the caller gives, or `DrivePort` for a drive that keeps its own time |
@@ -128,19 +131,22 @@ One instruction, from the loop in `Sh1::run`:
    undefined code or a branch in a delay slot is taken here too. Each of these enters its handler,
    and the loop starts again there.
 3. `Board::executing` checks the PC against the declared code, counts the instruction, marks its
-   coverage, passes its cycles and writes the trace.
+   coverage, writes the trace and passes the cycles of its fetch.
 4. PC moves on, to the branch destination in a delay slot, and `execute_one` dispatches to the
-   handler. Its accesses reach `Board::load` and `Board::store`, which decode the address to a
-   device.
-5. A device that changed an interrupt source asked for a check with `Sh1::request_check`. Outside a
+   handler. Its accesses reach `Board::load` and `Board::store`, which pass the access's cycles
+   and decode the address to a device.
+5. `Board::completed` passes the cycles the instruction has left.
+6. A device that changed an interrupt source asked for a check with `Sh1::request_check`. Outside a
    delay slot `Sh1::accept_interrupt` runs now, or one instruction later after LDC, STC, LDS or STS.
 
 Time passes in one place, `Board::advance`:
 
 - Without the clock no cycles pass. Instructions are counted, and the card's ticks follow that
   count.
-- With the clock, `Board::executing` advances `cycles_per_instruction` as each instruction starts,
-  before its handler runs. `cdblock_clock_advance` advances what the caller gives.
+- With the clock an instruction's cycles pass in pieces: its fetch as it starts, each data access
+  before the access acts, and the rest once its handler has run. So a register the instruction
+  reads shows the clock of that bus cycle. `Pipeline` says how many cycles each piece takes, with
+  the bus cycles' states from the `Sh7034`. `cdblock_clock_advance` advances what the caller gives.
 - Most advances only add to the cycle count, in `Sh7034::advance`. The ITU channels count when the
   clock reaches the first count that does more than add one to a TCNT, a compare match or an
   overflow. They also count before anything that changes a TCNT or what a channel counts by: a
@@ -162,9 +168,10 @@ A run ends in one of two ways:
 To read the code, start from `include/cdblock.h`, then:
 
 1. `src/board/board.h`, for the parts and what each asks of the board.
-2. `src/cpu/sh1.h`, `src/cpu/sh1.cpp` and the top of `src/cpu/instructions.cpp`, for the loop.
-3. `src/board/board.cpp`: `decode`, `Board::run`, `Board::boundary`, `Board::executing` and
-   `Board::advance_events`.
+2. `src/cpu/sh1.h`, `src/cpu/sh1.cpp` and the top of `src/cpu/instructions.cpp`, for the loop, and
+   `src/cpu/pipeline.h` for an instruction's cycles.
+3. `src/board/board.cpp`: `decode`, `bus_states`, `Board::run`, `Board::boundary`,
+   `Board::executing`, `Board::completed` and `Board::advance_events`.
 4. `src/sh7034/registers.h` and `src/sh7034/sh7034.h`, for the on-chip modules by name.
 5. `src/board/link.h`, `src/drive/drive.h` and `src/drive/disc.h`, for the drive and its wire
    format.
@@ -296,8 +303,20 @@ a separate unit on the serial link. Three implementations come with the library:
 
 ## What it does not model
 
-- No instruction timing and no bus timing. With the clock each instruction takes the same number
-  of cycles. Without it, counters change only when the CPU or the caller writes them.
+- Time outside instructions. DRAM refresh, the bus cycles of DMA transfers and the entry of an
+  exception or an interrupt take no cycles ([the clock](#the-clock)). Without the clock, counters
+  change only when the CPU or the caller writes them.
+- The pipeline stage by stage. Each instruction is charged its own fetch and data accesses, where
+  on the chip a data access shares its slot with the fetch of the third instruction after it
+  (Programming Manual 7.4.1).
+  - Code in the buffer DRAM and the card ROM, where every fetch is a bus cycle, takes the chip's
+    states over a run of instructions.
+  - Code in the on-chip ROM and RAM does not, instruction by instruction. A load at a longword
+    address takes two states and one at a word address one, where the chip takes one and two
+    (Programming Manual 7.4.3). The sums agree where data accesses fall on both kinds of address
+    alike.
+  - LDC.L into SR followed by an instruction that uses T takes no wait.
+  - SLEEP executes once more as its wake-up's handler returns. That pass takes no cycles.
 - The SH-1's MACH outside MAC.W with S clear. LDS and LDS.L store all 32 bits where the SH-1 keeps
   10, sign-extended, and a saturating MAC.W does not set bit 0 on an overflow (Programming Manual
   6.28 and 6.30).
@@ -340,7 +359,7 @@ What a board without a card reads there is unconfirmed.
 #include "cdblock.h"
 
 /* rom is a 64 KB CD-block dump, and card_rom an MPEG card's ROM, or NULL with a size of 0. */
-cdblock_options options = {CDBLOCK_DEVICE_TIMING | CDBLOCK_CLOCK, card_rom, card_rom_size, 0};
+cdblock_options options = {CDBLOCK_DEVICE_TIMING | CDBLOCK_CLOCK, card_rom, card_rom_size};
 cdblock_board *board = cdblock_create(rom, 65536, &options);
 cdblock_add_stop(board, idle_pc); /* the firmware's idle loop, below */
 if (cdblock_run(board, 50000000, NULL) != CDBLOCK_EXIT_STOP) puts(cdblock_last_error(board));
@@ -378,6 +397,8 @@ The [CD-block SH-1 demo](https://github.com/LysergicWarp/Sega-Saturn-CDblock-SH1
 - An event raised at a stop is accepted before the next instruction, unless the stop follows an
   LDC, STC, LDS or STS or sits in a delay slot, where no interrupt is accepted. Then the
   instruction at the stop runs first.
+- `cdblock_run_cycles` takes its budget in cycles of the clock, for a host that gives the board
+  its share of time. It ends at the first instruction boundary where the budget has passed.
 - Device events: the host interface (`cdblock_host_*`), the decoder input (`cdblock_decoder_*`),
   the drive (`cdblock_drive_*`, `cdblock_link_*`), the MPEG card (`cdblock_card_*`), the timers
   (`cdblock_timer_*`), the TEST pad (`cdblock_test_pad`) and SCI1's line (`cdblock_serial_*`).
@@ -387,8 +408,9 @@ The [CD-block SH-1 demo](https://github.com/LysergicWarp/Sega-Saturn-CDblock-SH1
   link bytes sent, words reaching the card's ports, the disc drive's commands, reports and sectors,
   bytes SCI1 sent and bytes from its line it did not take, interrupts and exceptions entered, and
   the violations of a lenient run. `cdblock_add_watch` adds the CPU's accesses to a range.
-- `cdblock_trace_open` writes a text trace: a row for each instruction as it starts, and one for
-  each log entry, interrupt, exception and the error that fails the board.
+- `cdblock_trace_open` writes a text trace: a row for each instruction as it starts, with the
+  clock's cycle, and one for each log entry, interrupt, exception and the error that fails the
+  board.
 - `cdblock_log_kinds` chooses the kinds the log keeps. Every word the SH-1 sends the host is an
   entry, so a host that runs a game keeps only the kinds it reads. The trace still writes every
   kind.
@@ -442,8 +464,60 @@ which moves no words.
 ## The clock
 
 `CDBLOCK_CLOCK` gives the board a system clock, φ, counted in cycles from reset. Each instruction
-takes `cycles_per_instruction` cycles (an option, 1 by default), and `cdblock_clock_advance` adds
-cycles without instructions, as time that passes while the CPU waits.
+takes its cycles, and `cdblock_clock_advance` adds cycles without instructions, as time that
+passes while the CPU waits.
+
+An instruction's cycles follow its kind and the memory it uses:
+
+- An instruction takes its execution states (Hardware Manual Tables 2.12 to 2.17) as pipeline
+  slots. A slot with a bus cycle takes that cycle's states, a slot with a fetch and a data access
+  takes both, and a slot with neither takes one (Programming Manual 7.2.3 and 7.4.1).
+- A bus cycle takes the states the bus state controller's registers give as last written (Hardware
+  Manual 8.2), so code that rewrites them is followed, and before the firmware's setup the reset
+  values apply. A longword on a 16-bit bus is two cycles.
+
+  | Access | States | With the CDB105 firmware's settings |
+  | --- | --- | --- |
+  | On-chip ROM and RAM | 1, 32 bits wide | 1 |
+  | On-chip registers | 3 | 3 |
+  | Interface chip and the card's registers | 1, and WCR3's long wait for areas 0 and 2 | 2 |
+  | Card ROM | 1, and WCR3's long wait for area 6 | 5 |
+  | Buffer DRAM, in the open row | The column cycle, 1 or 2 by WCR1 | 2 |
+  | Buffer DRAM, another row | DCR's precharge of 1 or 2, 1 for the row and the column cycle | 5 |
+
+- The DRAM has one open row, the row of the last access to it, of the size DCR sets: 512 bytes
+  with the firmware's settings. With RAS down it stays open across accesses to other areas. With
+  RAS up any other access closes it, and without burst operation every access is a full one.
+- Code in the DRAM or the card ROM fetches each instruction. From the on-chip ROM and RAM a fetch
+  at a longword address brings the next instruction with it, whose own fetch then takes no bus
+  cycle (Programming Manual 7.4.2).
+- A BT or BF that branches and TRAPA fetch the two instructions after them first (Hardware Manual
+  6.5.2).
+- An instruction that uses the register the one before it loaded waits a state for it, unless the
+  load's slot already took a fetch's bus cycle as well (Programming Manual 7.5).
+- MULS, MULU and MAC.W keep the multiplier for three states, and an instruction that reaches it
+  sooner waits: another multiply, MAC.W, CLRMAC, or an LDS or STS of MACH or MACL (Programming
+  Manual 7.7.2).
+- On a console, code in the buffer DRAM took 2.09 cycles for register arithmetic, 6.24 for a BT
+  that branches, 3.12 for MULS.W back to back, 10.2 for a word and 12.2 for a longword loaded from
+  another row. The rules give 2, 6, 3, 10 and 12.
+- From host command `00` to its CMOK flag the CDB105 firmware takes about 1.65 cycles an
+  instruction.
+
+What takes no cycles, and what is unconfirmed:
+
+- DRAM refresh, the bus cycles of DMA transfers, which also leave the open row as it is, and the
+  entry of an exception or an interrupt. TRAPA takes its eight states.
+- The 2 to 4% between the rules and the console's figures is not modeled. Refresh is the likely
+  part.
+- Unconfirmed: the multiplier's states but for MULS.W back to back, the access times of the MPEG
+  card's registers and ROM, the precharge in RAS up mode and without burst operation, and the two
+  bus cycles of a longword in the on-chip registers' 16-bit half and of a word in their 8-bit half.
+
+`cdblock_run_cycles` runs with a budget in cycles. `cdblock_run`, `cdblock_run_from_stop` and
+`cdblock_step` keep theirs in instructions.
+
+The timers and the devices on the clock:
 
 - Each ITU channel started in TSTR counts φ, φ/2, φ/4 or φ/8 as its TCR selects. The prescaler
   is taken to run from reset, so a channel's first count comes at the next multiple of its
@@ -464,9 +538,6 @@ cycles without instructions, as time that passes while the CPU waits.
   of a read is a drive action, 98 a sector period, whether or not flag 5 is enabled.
 - A channel started with an external clock, in phase counting, synchronous operation, or
   complementary or reset-synchronized PWM counts nothing and is a strict check.
-
-Real instructions take one to several cycles depending on the instruction and the memory they use,
-so timers on this clock drift from the firmware's real timing.
 
 ## The serial line
 
@@ -775,8 +846,8 @@ The landing:
 
 The other reports follow what the firmware accepts. The timing defaults count the SH-1's 20 MHz
 clock. `idle_frame_cycles` and `search_cycles` are a JVC ENR-013A's (above). The others are
-guesses: 4000 cycles between strobes, above the 3389 that a byte's 3200 and the SH-1's answer 189
-instructions after the strobe need, 1/15 s to seek, 15 frames a period while scanning, and a read
+guesses: 4000 cycles between strobes, above the 3536 that a byte's 3200 and the SH-1's answer 189
+instructions (336 cycles) after the strobe need, 1/15 s to seek, 15 frames a period while scanning, and a read
 landing 4 frames early. A real drive's other timing and answers are not confirmed. The log holds each command but 00, Null, and each report, sector and audio
 sector. A link frame
 the SH-1 did not answer in full carries no command, and the link logs the strobes it missed.

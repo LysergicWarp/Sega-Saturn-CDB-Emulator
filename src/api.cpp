@@ -93,9 +93,9 @@ template <class F> auto guarded(cdblock_board *b, F f) -> decltype(f())
     return caught(b, f);
 }
 
-int run(cdblock_board *b, uint64_t budget, bool skip, uint32_t *pc)
+int run(cdblock_board *b, uint64_t budget, bool skip, uint32_t *pc, bool in_cycles = false)
 {
-    const auto exit = b->board->run(budget, skip);
+    const auto exit = b->board->run(budget, skip, in_cycles);
     if (pc)
         *pc = b->board->cpu_state().pc;
     return int(exit);
@@ -123,7 +123,6 @@ cdblock_board *cdblock_create(const uint8_t *rom, size_t rom_size, const cdblock
             o.probe_mirror = options->flags & CDBLOCK_PROBE_MIRROR;
             o.device_timing = options->flags & CDBLOCK_DEVICE_TIMING;
             o.clock = options->flags & CDBLOCK_CLOCK;
-            o.cycles_per_instruction = options->cycles_per_instruction ? options->cycles_per_instruction : 1;
             if (options->card_rom)
             {
                 if (options->card_rom_size == 0 || options->card_rom_size > Card::rom_size)
@@ -222,6 +221,10 @@ int cdblock_run_from_stop(cdblock_board *b, uint64_t budget, uint32_t *pc)
 int cdblock_step(cdblock_board *b, uint32_t *pc)
 {
     return run(b, 1, true, pc);
+}
+int cdblock_run_cycles(cdblock_board *b, uint64_t cycles, uint32_t *pc)
+{
+    return run(b, cycles, false, pc, true);
 }
 
 int cdblock_add_stop(cdblock_board *b, uint32_t pc)

@@ -143,12 +143,12 @@ void timer_overflow()
 }
 
 const uint8_t card_rom[16] = {};
-const cdblock_options clocked{CDBLOCK_CLOCK, card_rom, sizeof card_rom, 0};
+const cdblock_options clocked{CDBLOCK_CLOCK, card_rom, sizeof card_rom};
 
 void clock_prescalers()
 {
     Program p;
-    p.loop();
+    p.sled();
     Board b(p, &clocked);
     b.write(0x05ffff04, 1, 0x03); // TCR0: φ/8
     b.write(0x05ffff0e, 1, 0x01); // TCR1: φ/2
@@ -178,11 +178,12 @@ void clock_compare_clear()
     b.write(0x05ffff38, 2, 9);      // GRA4
     b.write(0x05ffff34, 1, 0x01);   // TIER4: IMIEA
     b.write(0x05ffff00, 1, 0x10);   // TSTR: channel 4
-    // Counts at cycles 4..12 reach 9, and the count at 13 matches and clears. The flag is taken at
-    // the boundary after that instruction.
+    // Counts at cycles 4..12 reach 9, and the count at 13 matches and clears. The loop's BRA takes
+    // two cycles and its NOP one, so that is the fourth BRA's first. The flag is taken at the
+    // boundary after its delay slot, two counts on.
     cdblock_remove_stop(b, loop);
-    CHECK(b.resume() == CDBLOCK_EXIT_STOP && b.cpu().pc == handler && cdblock_instructions(b) == 13);
-    CHECK(b.peek(0x05ffff36, 2) == 0 && (b.peek(0x05ffff35, 1) & 1));
+    CHECK(b.resume() == CDBLOCK_EXIT_STOP && b.cpu().pc == handler && cdblock_instructions(b) == 11);
+    CHECK(cdblock_clock_cycles(b) == 15 && b.peek(0x05ffff36, 2) == 2 && (b.peek(0x05ffff35, 1) & 1));
 }
 
 void clock_overflow_and_skip()
@@ -224,17 +225,6 @@ void clock_periodic_skip()
     b.write(0x05ffff14, 2, 99);   // GRA1
     b.write(0x05ffff00, 1, 0x02);
     CHECK(cdblock_clock_advance(b, 1000003) == 0 && b.peek(0x05ffff12, 2) == 3 && (b.peek(0x05ffff11, 1) & 1));
-}
-
-void clock_rate()
-{
-    Program p;
-    p.loop();
-    const cdblock_options eight{CDBLOCK_CLOCK, card_rom, sizeof card_rom, 8};
-    Board b(p, &eight);
-    b.write(0x05ffff04, 1, 0x03); // TCR0: φ/8
-    b.write(0x05ffff00, 1, 0x01);
-    CHECK(b.run(10) == CDBLOCK_EXIT_BUDGET && cdblock_clock_cycles(b) == 80 && b.peek(0x05ffff08, 2) == 10);
 }
 
 void clock_dma_per_match()
@@ -293,7 +283,7 @@ void clock_reconfigured()
 {
     // A running channel takes a new prescaler or mode at once, and a reset stops it.
     Program p;
-    p.loop();
+    p.sled();
     Board b(p, &clocked);
     b.write(0x05ffff04, 1, 0x03); // TCR0: φ/8
     b.write(0x05ffff00, 1, 0x01); // TSTR: channel 0
@@ -363,7 +353,7 @@ void clock_between_events()
     // still reads as counted, and a change to it or to what the channel counts by stands from the
     // cycle it comes at.
     Program p;
-    p.loop();
+    p.sled();
     Board b(p, &clocked);
     const uint32_t tsr = 0x05ffff07, tcnt = 0x05ffff08, gra = 0x05ffff0a, grb = 0x05ffff0c;
     b.write(0x05ffff04, 1, 0x02); // TCR0: φ/4, free running
@@ -427,7 +417,7 @@ void clock_dma_reads_other_channel()
     // A DMA unit on channel 0's compare match reads TCNT1, which has only added one since it
     // started. Channel 0 counts first in a step, so the unit sees TCNT1 as the step found it.
     Program p;
-    p.loop();
+    p.sled();
     Board b(p, &clocked);
     b.write(0x05ffff04, 1, 0x23);       // TCR0: φ/8, cleared by GRA
     b.write(0x05ffff0a, 2, 3);          // GRA0: a match at the fourth count, cycle 32
@@ -446,7 +436,7 @@ void clock_dma_reads_other_channel()
 void clock_modes()
 {
     Program p;
-    p.loop();
+    p.sled();
     // CMD 01 in TFCR is normal operation: channel 3 counts.
     Board normal(p, &clocked);
     normal.write(0x05ffff03, 1, 0xd0);
@@ -485,7 +475,7 @@ void capture_buffer()
 void clock_capture_and_buffer()
 {
     Program p;
-    p.loop();
+    p.sled();
     Board b(p, &clocked);
     // Channel 0 cleared by its capture A, on the card's audio data request.
     b.write(0x05ffff05, 1, 0x0d); // TIOR0: capture A on falling edges
@@ -536,7 +526,6 @@ const std::vector<Test> sh7034_tests = {
     {"clock: periodic counter skipped far", clock_periodic_skip},
     {"clock: a counter read and changed between its events", clock_between_events},
     {"clock: a DMA unit reading another channel's counter", clock_dma_reads_other_channel},
-    {"clock: cycles per instruction", clock_rate},
     {"clock: a DMA unit per compare match", clock_dma_per_match},
     {"clock: a burst that changes its source", clock_burst_changes_source},
     {"clock: TFCR CMD and PWM mode", clock_modes},

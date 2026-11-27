@@ -5,8 +5,8 @@
 // mame0289's SH core: the handlers and dispatch from src/devices/cpu/sh/sh.cpp, the loop, the SR
 // loads, RTE and TRAPA from src/devices/cpu/sh/sh2.cpp. Notice: MAME-NOTICE.txt.
 //
-// The cycles in each handler's heading are MAME's and unused here: with the clock on, every
-// instruction takes the board's cycles_per_instruction.
+// The cycles in each handler's heading are MAME's and unused here: pipeline.cpp has each
+// instruction's execution states.
 // clang-format off
 // NOLINTBEGIN
 #include "sh1.h"
@@ -46,7 +46,9 @@ void Sh1::run() {
             } else {
                 state.pc += 2;
             }
+            const uint32_t next = state.pc;
             execute_one(opcode);
+            port->completed(state.pc != next);
             if (test_irq && !state.delay) {
                 check_interrupts();
                 test_irq = false;

@@ -26,6 +26,9 @@ class Sh1Port
     virtual bool boundary(uint32_t pc) = 0;
     // The instruction about to execute.
     virtual void executing(uint32_t pc, uint16_t opcode, bool slot) = 0;
+    // That instruction has executed. branched says it left the next instruction's address at
+    // once, as a BT or BF that branches and TRAPA do.
+    virtual void completed(bool branched) = 0;
     // The interrupt controller's choice: the request's priority level (0 for none) and vector.
     virtual unsigned interrupt_request(unsigned &vector) = 0;
     virtual void interrupt_accepted(unsigned vector, unsigned level) = 0;

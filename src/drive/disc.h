@@ -146,8 +146,8 @@ struct DiscDriveConfig
     uint32_t sector_cycles = 266'667;
     // From one strobe of a link frame to the next, and from the last to the link frame's end. A
     // byte takes 3200 cycles at the SH-1's 50,000 bit/s, and the CDB105 firmware starts its answer
-    // 189 instructions after a strobe, a cycle each here and more on the chip. Strobes need 3389
-    // cycles apart here: 4000, 200 µs, a guess.
+    // 189 instructions after a strobe, which take 336 cycles. Strobes need 3536 cycles apart:
+    // 4000, 200 µs, a guess.
     uint32_t strobe_cycles = 4'000;
     // From a seek, read or ring seek command to arriving at its frame address.
     uint32_t seek_cycles = 1'333'333;
